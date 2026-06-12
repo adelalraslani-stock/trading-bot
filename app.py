@@ -86,7 +86,7 @@ def home():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        data   = request.get_json(force=True)
+        data = request.get_json(force=True, silent=True) or {}
         action = data.get('action', '')
         symbol = data.get('symbol', 'SPY')
 
