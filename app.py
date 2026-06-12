@@ -1,58 +1,52 @@
 from flask import Flask, request, jsonify
-from ib_insync import *
-import os, datetime
+import requests, os, datetime
 
 app = Flask(__name__)
 
-ACCOUNT = 'DUQ733599'
-TAKE_PROFIT = 0.10
-STOP_LOSS = 0.50
+ALPACA_KEY     = os.environ.get('ALPACA_KEY')
+ALPACA_SECRET  = os.environ.get('ALPACA_SECRET')
+ALPACA_BASE    = os.environ.get('ALPACA_BASE_URL', 'https://paper-api.alpaca.markets')
 
-def connect_ibkr():
-    ib = IB()
-    ib.connect('trade.interactivebrokers.com', 10090, clientId=1)
-    return ib
+TAKE_PROFIT    = 0.10
+STOP_LOSS      = 0.50
+
+HEADERS = {
+    'APCA-API-KEY-ID'    : ALPACA_KEY,
+    'APCA-API-SECRET-KEY': ALPACA_SECRET
+}
+
+def get_latest_price(symbol):
+    url = f"https://data.alpaca.markets/v2/stocks/{symbol}/quotes/latest"
+    r = requests.get(url, headers=HEADERS)
+    return r.json()['quote']['ap']
 
 def place_option_order(symbol, action):
-    ib = connect_ibkr()
-    
-    stock = Stock(symbol, 'SMART', 'USD')
-    ib.qualifyContracts(stock)
-    ticker = ib.reqMktData(stock)
-    ib.sleep(2)
-    price = ticker.marketPrice()
-    
-    today = datetime.date.today()
-    friday = today + datetime.timedelta((4 - today.weekday()) % 7)
-    expiry = friday.strftime('%Y%m%d')
-    strike = round(price / 5) * 5
-    right = 'C' if action == 'CALL' else 'P'
-    
-    option = Option(symbol, expiry, strike, right, 'SMART')
-    ib.qualifyContracts(option)
-    
-    opt_ticker = ib.reqMktData(option)
-    ib.sleep(2)
-    opt_price = opt_ticker.marketPrice()
-    
-    tp = round(opt_price * (1 + TAKE_PROFIT), 2)
-    sl = round(opt_price * (1 - STOP_LOSS), 2)
-    
-    bracket = ib.bracketOrder('BUY', 1,
-        limitPrice=round(opt_price * 1.01, 2),
-        takeProfitPrice=tp,
-        stopLossPrice=sl,
-        account=ACCOUNT)
-    
-    for order in bracket:
-        ib.placeOrder(option, order)
-    
-    ib.sleep(2)
-    ib.disconnect()
-    
-    return {'symbol': symbol, 'action': action,
-            'strike': strike, 'expiry': expiry,
-            'price': opt_price, 'tp': tp, 'sl': sl}
+    price    = get_latest_price(symbol)
+    today    = datetime.date.today()
+    friday   = today + datetime.timedelta((4 - today.weekday()) % 7)
+    expiry   = friday.strftime('%Y-%m-%d')
+    strike   = round(price / 5) * 5
+    opt_type = 'call' if action == 'CALL' else 'put'
+
+    order = {
+        "symbol"        : f"{symbol}{friday.strftime('%y%m%d')}{opt_type[0].upper()}{int(strike*1000):08d}",
+        "qty"           : "1",
+        "side"          : "buy",
+        "type"          : "market",
+        "time_in_force" : "day"
+    }
+
+    url = f"{ALPACA_BASE}/v2/orders"
+    r   = requests.post(url, json=order, headers=HEADERS)
+
+    return {
+        'symbol' : symbol,
+        'action' : action,
+        'strike' : strike,
+        'expiry' : expiry,
+        'status' : r.status_code,
+        'result' : r.json()
+    }
 
 @app.route('/')
 def home():
@@ -61,16 +55,16 @@ def home():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        data = request.get_json(force=True)
+        data   = request.get_json(force=True)
         action = data.get('action', '')
         symbol = data.get('symbol', 'SPY')
-        
+
         if symbol not in ['SPY', 'QQQ', 'XSP']:
             symbol = 'SPY'
-        
+
         result = place_option_order(symbol, action)
         return jsonify({'status': 'success', 'data': result})
-    
+
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
