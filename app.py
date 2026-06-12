@@ -1,3 +1,1 @@
-flask
-gunicorn
-requests
+from flask import Flask, request, jsonify
