@@ -44,7 +44,7 @@ def place_option_order(symbol, action):
 
     result = r.json()
 
-    if r.status_code == 200 or r.status_code == 201:
+    if r.status_code in [200, 201]:
         opt_price = float(result.get('filled_avg_price') or 1)
         tp_price  = round(opt_price * (1 + TAKE_PROFIT), 2)
         sl_price  = round(opt_price * (1 - STOP_LOSS), 2)
@@ -83,10 +83,15 @@ def place_option_order(symbol, action):
 def home():
     return 'Trading Bot is Running'
 
+@app.route('/test')
+def test():
+    result = place_option_order('SPY', 'PUT')
+    return jsonify(result)
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        data = request.get_json(force=True, silent=True) or {}
+        data   = request.get_json(force=True, silent=True) or {}
         action = data.get('action', '')
         symbol = data.get('symbol', 'SPY')
 
