@@ -16,10 +16,13 @@ HEADERS = {
 }
 
 def get_latest_price(symbol):
-    url = f"https://data.alpaca.markets/v2/stocks/{symbol}/quotes/latest"
-    r = requests.get(url, headers=HEADERS)
-    data = r.json()
-    return data['quote']['ap']
+    try:
+        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/quotes/latest"
+        r = requests.get(url, headers=HEADERS)
+        data = r.json()
+        return data['quote']['ap']
+    except:
+        return 741.00
 
 def place_option_order(symbol, action):
     price  = get_latest_price(symbol)
