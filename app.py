@@ -32,7 +32,7 @@ def place_option_order(symbol, action):
     strike = round(price / 5) * 5
     right  = 'call' if action == 'CALL' else 'put'
 
-    symbol_occ = f"{symbol}{friday.strftime('%y%m%d')}{right[0].upper()}{int(strike*1000):08d}"
+    symbol_occ = f"{symbol}{friday.strftime('%y%m%d')}{right[0].upper()}{int(strike):05d}000"
 
     order = {
         "symbol"       : symbol_occ,
@@ -74,12 +74,13 @@ def place_option_order(symbol, action):
         requests.post(f"{ALPACA_BASE}/v2/orders", json=sl_order, headers=HEADERS)
 
     return {
-        'symbol': symbol,
-        'action': action,
-        'strike': strike,
-        'expiry': expiry,
-        'status': r.status_code,
-        'result': result
+        'symbol'    : symbol,
+        'action'    : action,
+        'strike'    : strike,
+        'expiry'    : expiry,
+        'occ_symbol': symbol_occ,
+        'status'    : r.status_code,
+        'result'    : result
     }
 
 @app.route('/')
