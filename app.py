@@ -28,11 +28,10 @@ def place_option_order(symbol, action):
     price  = get_latest_price(symbol)
     today  = datetime.date.today()
     friday = today + datetime.timedelta((4 - today.weekday()) % 7)
-    expiry = friday.strftime('%Y-%m-%d')
     strike = round(price / 5) * 5
-    right  = 'call' if action == 'CALL' else 'put'
+    right  = 'C' if action == 'CALL' else 'P'
 
-    symbol_occ = f"{symbol}{friday.strftime('%y%m%d')}{right[0].upper()}{int(strike):05d}000"
+    symbol_occ = f"{symbol}{friday.strftime('%y%m%d')}{right}{int(strike*1000):08d}"
 
     order = {
         "symbol"       : symbol_occ,
@@ -44,7 +43,6 @@ def place_option_order(symbol, action):
 
     url = f"{ALPACA_BASE}/v2/orders"
     r   = requests.post(url, json=order, headers=HEADERS)
-
     result = r.json()
 
     if r.status_code in [200, 201]:
@@ -77,7 +75,6 @@ def place_option_order(symbol, action):
         'symbol'    : symbol,
         'action'    : action,
         'strike'    : strike,
-        'expiry'    : expiry,
         'occ_symbol': symbol_occ,
         'status'    : r.status_code,
         'result'    : result
