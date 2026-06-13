@@ -24,10 +24,16 @@ def get_latest_price(symbol):
     except:
         return 741.00
 
+def get_next_friday():
+    today = datetime.date.today()
+    days_until_friday = (4 - today.weekday()) % 7
+    if days_until_friday == 0:
+        return today
+    return today + datetime.timedelta(days=days_until_friday)
+
 def place_option_order(symbol, action):
     price  = get_latest_price(symbol)
-    today  = datetime.date.today()
-    friday = today + datetime.timedelta((4 - today.weekday()) % 7)
+    friday = get_next_friday()
     strike = round(price / 5) * 5
     right  = 'C' if action == 'CALL' else 'P'
 
@@ -75,6 +81,7 @@ def place_option_order(symbol, action):
         'symbol'    : symbol,
         'action'    : action,
         'strike'    : strike,
+        'friday'    : str(friday),
         'occ_symbol': symbol_occ,
         'status'    : r.status_code,
         'result'    : result
