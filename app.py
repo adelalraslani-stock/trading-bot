@@ -22,19 +22,23 @@ def get_latest_price(symbol):
         data = r.json()
         return data['quote']['ap']
     except:
-        return 741.00
+        return 737.00
 
-def get_next_friday():
+def get_next_expiry():
     today = datetime.date.today()
+    # الجمعة القادمة
     days_until_friday = (4 - today.weekday()) % 7
     if days_until_friday == 0:
-        return today
+        # اليوم جمعة — خذ الجمعة القادمة
+        return today + datetime.timedelta(days=7)
     return today + datetime.timedelta(days=days_until_friday)
 
 def place_option_order(symbol, action):
     price  = get_latest_price(symbol)
-    friday = get_next_friday()
-    strike = round(price / 5) * 5
+    friday = get_next_expiry()
+    
+    # السترايك أقرب دولار للسعر الحالي
+    strike = round(price)
     right  = 'C' if action == 'CALL' else 'P'
 
     symbol_occ = f"{symbol}{friday.strftime('%y%m%d')}{right}{int(strike*1000):08d}"
@@ -80,6 +84,7 @@ def place_option_order(symbol, action):
     return {
         'symbol'    : symbol,
         'action'    : action,
+        'price'     : price,
         'strike'    : strike,
         'friday'    : str(friday),
         'occ_symbol': symbol_occ,
