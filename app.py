@@ -33,22 +33,26 @@ def get_option_price(symbol_occ):
     except:
         return None
 
-def get_expiry():
-    today = datetime.date.today()
-    days_until_friday = (4 - today.weekday()) % 7
-    if days_until_friday == 0:
+def get_expiry_from_signal(signal_time):
+    try:
+        # نفس يوم الإشارة من TradingView
+        signal_dt = datetime.datetime.fromisoformat(signal_time.replace('Z', '+00:00'))
+        # تحويل من UTC لتوقيت نيويورك (UTC-4)
+        ny_time = signal_dt - datetime.timedelta(hours=4)
+        return ny_time.date()
+    except:
+        # إذا ما في وقت نستخدم اليوم
+        today = datetime.date.today()
         return today
-    return today + datetime.timedelta(days=days_until_friday)
 
-def place_option_order(symbol, action):
+def place_option_order(symbol, action, signal_time=None):
     price  = get_latest_price(symbol)
-    expiry = get_expiry()
+    expiry = get_expiry_from_signal(signal_time)
     strike = round(price)
     right  = 'C' if action == 'CALL' else 'P'
 
     symbol_occ = f"{symbol}{expiry.strftime('%y%m%d')}{right}{int(strike*1000):08d}"
 
-    # نجيب سعر الأوبشن أولاً
     opt_price = get_option_price(symbol_occ)
 
     if opt_price:
@@ -56,17 +60,16 @@ def place_option_order(symbol, action):
         sl_price = round(opt_price * (1 - STOP_LOSS), 2)
 
         order = {
-            "symbol"        : symbol_occ,
-            "qty"           : "1",
-            "side"          : "buy",
-            "type"          : "market",
-            "time_in_force" : "day",
-            "order_class"   : "bracket",
-            "take_profit"   : {"limit_price": str(tp_price)},
-            "stop_loss"     : {"stop_price": str(sl_price)}
+            "symbol"       : symbol_occ,
+            "qty"          : "1",
+            "side"         : "buy",
+            "type"         : "market",
+            "time_in_force": "day",
+            "order_class"  : "bracket",
+            "take_profit"  : {"limit_price": str(tp_price)},
+            "stop_loss"    : {"stop_price" : str(sl_price)}
         }
     else:
-        # بدون TP/SL إذا ما قدرنا نجيب السعر
         order = {
             "symbol"       : symbol_occ,
             "qty"          : "1",
@@ -99,20 +102,23 @@ def home():
 
 @app.route('/test')
 def test():
-    result = place_option_order('SPY', 'CALL')
+    # اختبار بوقت حقيقي اليوم
+    now = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+    result = place_option_order('SPY', 'CALL', now)
     return jsonify(result)
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        data   = request.get_json(force=True, silent=True) or {}
-        action = data.get('action', '')
-        symbol = data.get('symbol', 'SPY')
+        data        = request.get_json(force=True, silent=True) or {}
+        action      = data.get('action', '')
+        symbol      = data.get('symbol', 'SPY')
+        signal_time = data.get('time', None)
 
         if symbol not in ['SPY', 'QQQ', 'XSP']:
             symbol = 'SPY'
 
-        result = place_option_order(symbol, action)
+        result = place_option_order(symbol, action, signal_time)
         return jsonify({'status': 'success', 'data': result})
 
     except Exception as e:
