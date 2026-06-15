@@ -22,26 +22,19 @@ def get_latest_price(symbol):
         data = r.json()
         return data['quote']['ap']
     except:
-        return 737.00
+        return 755.00
 
-def get_next_expiry():
-    today = datetime.date.today()
-    # الجمعة القادمة
-    days_until_friday = (4 - today.weekday()) % 7
-    if days_until_friday == 0:
-        # اليوم جمعة — خذ الجمعة القادمة
-        return today + datetime.timedelta(days=7)
-    return today + datetime.timedelta(days=days_until_friday)
+def get_expiry():
+    # اليوم جمعة — استخدم اليوم
+    return datetime.date(2026, 6, 16)
 
 def place_option_order(symbol, action):
     price  = get_latest_price(symbol)
-    friday = get_next_expiry()
-    
-    # السترايك أقرب دولار للسعر الحالي
+    expiry = get_expiry()
     strike = round(price)
     right  = 'C' if action == 'CALL' else 'P'
 
-    symbol_occ = f"{symbol}{friday.strftime('%y%m%d')}{right}{int(strike*1000):08d}"
+    symbol_occ = f"{symbol}{expiry.strftime('%y%m%d')}{right}{int(strike*1000):08d}"
 
     order = {
         "symbol"       : symbol_occ,
@@ -86,7 +79,7 @@ def place_option_order(symbol, action):
         'action'    : action,
         'price'     : price,
         'strike'    : strike,
-        'friday'    : str(friday),
+        'expiry'    : str(expiry),
         'occ_symbol': symbol_occ,
         'status'    : r.status_code,
         'result'    : result
@@ -98,7 +91,7 @@ def home():
 
 @app.route('/test')
 def test():
-    result = place_option_order('SPY', 'PUT')
+    result = place_option_order('SPY', 'CALL')
     return jsonify(result)
 
 @app.route('/webhook', methods=['POST'])
