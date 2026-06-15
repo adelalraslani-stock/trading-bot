@@ -24,9 +24,21 @@ def get_latest_price(symbol):
     except:
         return 755.00
 
+def get_option_price(symbol_occ):
+    try:
+        url = f"https://data.alpaca.markets/v2/options/snapshots/{symbol_occ}"
+        r = requests.get(url, headers=HEADERS)
+        data = r.json()
+        return data['snapshot']['latestTrade']['p']
+    except:
+        return None
+
 def get_expiry():
-    # اليوم جمعة — استخدم اليوم
-    return datetime.date(2026, 6, 16)
+    today = datetime.date.today()
+    days_until_friday = (4 - today.weekday()) % 7
+    if days_until_friday == 0:
+        return today
+    return today + datetime.timedelta(days=days_until_friday)
 
 def place_option_order(symbol, action):
     price  = get_latest_price(symbol)
@@ -36,51 +48,47 @@ def place_option_order(symbol, action):
 
     symbol_occ = f"{symbol}{expiry.strftime('%y%m%d')}{right}{int(strike*1000):08d}"
 
-    order = {
-        "symbol"       : symbol_occ,
-        "qty"          : "1",
-        "side"         : "buy",
-        "type"         : "market",
-        "time_in_force": "day"
-    }
+    # نجيب سعر الأوبشن أولاً
+    opt_price = get_option_price(symbol_occ)
+
+    if opt_price:
+        tp_price = round(opt_price * (1 + TAKE_PROFIT), 2)
+        sl_price = round(opt_price * (1 - STOP_LOSS), 2)
+
+        order = {
+            "symbol"        : symbol_occ,
+            "qty"           : "1",
+            "side"          : "buy",
+            "type"          : "market",
+            "time_in_force" : "day",
+            "order_class"   : "bracket",
+            "take_profit"   : {"limit_price": str(tp_price)},
+            "stop_loss"     : {"stop_price": str(sl_price)}
+        }
+    else:
+        # بدون TP/SL إذا ما قدرنا نجيب السعر
+        order = {
+            "symbol"       : symbol_occ,
+            "qty"          : "1",
+            "side"         : "buy",
+            "type"         : "market",
+            "time_in_force": "day"
+        }
 
     url = f"{ALPACA_BASE}/v2/orders"
     r   = requests.post(url, json=order, headers=HEADERS)
     result = r.json()
 
-    if r.status_code in [200, 201]:
-        opt_price = float(result.get('filled_avg_price') or 1)
-        tp_price  = round(opt_price * (1 + TAKE_PROFIT), 2)
-        sl_price  = round(opt_price * (1 - STOP_LOSS), 2)
-
-        tp_order = {
-            "symbol"       : symbol_occ,
-            "qty"          : "1",
-            "side"         : "sell",
-            "type"         : "limit",
-            "limit_price"  : str(tp_price),
-            "time_in_force": "gtc"
-        }
-
-        sl_order = {
-            "symbol"       : symbol_occ,
-            "qty"          : "1",
-            "side"         : "sell",
-            "type"         : "stop",
-            "stop_price"   : str(sl_price),
-            "time_in_force": "gtc"
-        }
-
-        requests.post(f"{ALPACA_BASE}/v2/orders", json=tp_order, headers=HEADERS)
-        requests.post(f"{ALPACA_BASE}/v2/orders", json=sl_order, headers=HEADERS)
-
     return {
         'symbol'    : symbol,
         'action'    : action,
         'price'     : price,
+        'opt_price' : opt_price,
         'strike'    : strike,
         'expiry'    : str(expiry),
         'occ_symbol': symbol_occ,
+        'tp'        : round(opt_price * (1 + TAKE_PROFIT), 2) if opt_price else None,
+        'sl'        : round(opt_price * (1 - STOP_LOSS), 2) if opt_price else None,
         'status'    : r.status_code,
         'result'    : result
     }
