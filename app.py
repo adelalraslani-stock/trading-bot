@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-import requests, os, datetime
+import requests, os, datetime, time
 
 app = Flask(__name__)
 
@@ -24,26 +24,51 @@ def get_latest_price(symbol):
     except:
         return 755.00
 
-def get_option_price(symbol_occ):
-    try:
-        url = f"https://data.alpaca.markets/v2/options/snapshots/{symbol_occ}"
-        r = requests.get(url, headers=HEADERS)
-        data = r.json()
-        return data['snapshot']['latestTrade']['p']
-    except:
-        return None
-
 def get_expiry_from_signal(signal_time):
     try:
-        # نفس يوم الإشارة من TradingView
         signal_dt = datetime.datetime.fromisoformat(signal_time.replace('Z', '+00:00'))
-        # تحويل من UTC لتوقيت نيويورك (UTC-4)
         ny_time = signal_dt - datetime.timedelta(hours=4)
         return ny_time.date()
     except:
-        # إذا ما في وقت نستخدم اليوم
-        today = datetime.date.today()
-        return today
+        return datetime.date.today()
+
+def get_filled_price(order_id):
+    # ننتظر ثانيتين ثم نجيب سعر التنفيذ
+    time.sleep(2)
+    url = f"{ALPACA_BASE}/v2/orders/{order_id}"
+    r = requests.get(url, headers=HEADERS)
+    data = r.json()
+    filled_price = data.get('filled_avg_price')
+    if filled_price:
+        return float(filled_price)
+    return None
+
+def place_tp_sl(symbol_occ, opt_price):
+    tp_price = round(opt_price * (1 + TAKE_PROFIT), 2)
+    sl_price = round(opt_price * (1 - STOP_LOSS), 2)
+
+    tp_order = {
+        "symbol"       : symbol_occ,
+        "qty"          : "1",
+        "side"         : "sell",
+        "type"         : "limit",
+        "limit_price"  : str(tp_price),
+        "time_in_force": "gtc"
+    }
+
+    sl_order = {
+        "symbol"       : symbol_occ,
+        "qty"          : "1",
+        "side"         : "sell",
+        "type"         : "stop",
+        "stop_price"   : str(sl_price),
+        "time_in_force": "gtc"
+    }
+
+    requests.post(f"{ALPACA_BASE}/v2/orders", json=tp_order, headers=HEADERS)
+    requests.post(f"{ALPACA_BASE}/v2/orders", json=sl_order, headers=HEADERS)
+
+    return tp_price, sl_price
 
 def place_option_order(symbol, action, signal_time=None):
     price  = get_latest_price(symbol)
@@ -53,45 +78,37 @@ def place_option_order(symbol, action, signal_time=None):
 
     symbol_occ = f"{symbol}{expiry.strftime('%y%m%d')}{right}{int(strike*1000):08d}"
 
-    opt_price = get_option_price(symbol_occ)
-
-    if opt_price:
-        tp_price = round(opt_price * (1 + TAKE_PROFIT), 2)
-        sl_price = round(opt_price * (1 - STOP_LOSS), 2)
-
-        order = {
-            "symbol"       : symbol_occ,
-            "qty"          : "1",
-            "side"         : "buy",
-            "type"         : "market",
-            "time_in_force": "day",
-            "order_class"  : "bracket",
-            "take_profit"  : {"limit_price": str(tp_price)},
-            "stop_loss"    : {"stop_price" : str(sl_price)}
-        }
-    else:
-        order = {
-            "symbol"       : symbol_occ,
-            "qty"          : "1",
-            "side"         : "buy",
-            "type"         : "market",
-            "time_in_force": "day"
-        }
+    order = {
+        "symbol"       : symbol_occ,
+        "qty"          : "1",
+        "side"         : "buy",
+        "type"         : "market",
+        "time_in_force": "day"
+    }
 
     url = f"{ALPACA_BASE}/v2/orders"
     r   = requests.post(url, json=order, headers=HEADERS)
     result = r.json()
 
+    tp_price = None
+    sl_price = None
+
+    if r.status_code in [200, 201]:
+        order_id = result.get('id')
+        opt_price = get_filled_price(order_id)
+
+        if opt_price:
+            tp_price, sl_price = place_tp_sl(symbol_occ, opt_price)
+        
     return {
         'symbol'    : symbol,
         'action'    : action,
         'price'     : price,
-        'opt_price' : opt_price,
         'strike'    : strike,
         'expiry'    : str(expiry),
         'occ_symbol': symbol_occ,
-        'tp'        : round(opt_price * (1 + TAKE_PROFIT), 2) if opt_price else None,
-        'sl'        : round(opt_price * (1 - STOP_LOSS), 2) if opt_price else None,
+        'tp'        : tp_price,
+        'sl'        : sl_price,
         'status'    : r.status_code,
         'result'    : result
     }
@@ -102,7 +119,6 @@ def home():
 
 @app.route('/test')
 def test():
-    # اختبار بوقت حقيقي اليوم
     now = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
     result = place_option_order('SPY', 'CALL', now)
     return jsonify(result)
