@@ -10,8 +10,8 @@ ALPACA_BASE   = os.environ.get('ALPACA_BASE_URL', 'https://paper-api.alpaca.mark
 # ==============================
 # إعدادات الربح والخسارة
 # ==============================
-TAKE_PROFIT_PCT = 0.50   # 50% ربح
-STOP_LOSS_PCT   = 0.30   # 30% خسارة
+TAKE_PROFIT_PCT = 0.05   # 5% ربح
+STOP_LOSS_PCT   = 0.50   # 50% خسارة
 
 HEADERS = {
     'APCA-API-KEY-ID'    : ALPACA_KEY,
