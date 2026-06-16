@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-import requests, os, datetime, time
+import requests, os, datetime, threading
 
 app = Flask(__name__)
 
@@ -19,8 +19,7 @@ def get_latest_price(symbol):
     try:
         url = f"https://data.alpaca.markets/v2/stocks/{symbol}/quotes/latest"
         r = requests.get(url, headers=HEADERS)
-        data = r.json()
-        return data['quote']['ap']
+        return r.json()['quote']['ap']
     except Exception as e:
         print(f"Price error: {e}")
         return 755.00
@@ -34,51 +33,55 @@ def get_expiry_from_signal(signal_time):
         print(f"Expiry error: {e}")
         return datetime.date.today()
 
-def get_filled_price(order_id):
-    time.sleep(2)
-    url = f"{ALPACA_BASE}/v2/orders/{order_id}"
-    r = requests.get(url, headers=HEADERS)
-    data = r.json()
-    filled_price = data.get('filled_avg_price')
-    print(f"Filled price: {filled_price}")
-    if filled_price:
-        return float(filled_price)
-    return None
+def place_tp_sl(symbol_occ, order_id):
+    import time
+    # ننتظر 3 ثواني فقط للتأكد من التنفيذ
+    time.sleep(3)
+    try:
+        r = requests.get(f"{ALPACA_BASE}/v2/orders/{order_id}", headers=HEADERS)
+        filled_price = r.json().get('filled_avg_price')
+        print(f"Filled: {filled_price}")
 
-def place_tp_sl(symbol_occ, opt_price):
-    tp_price = round(opt_price * (1 + TAKE_PROFIT), 2)
-    sl_price = round(opt_price * (1 - STOP_LOSS), 2)
+        if not filled_price:
+            time.sleep(3)
+            r = requests.get(f"{ALPACA_BASE}/v2/orders/{order_id}", headers=HEADERS)
+            filled_price = r.json().get('filled_avg_price')
 
-    print(f"Placing TP: {tp_price}, SL: {sl_price}")
+        if filled_price:
+            opt_price = float(filled_price)
+            tp_price  = round(opt_price * (1 + TAKE_PROFIT), 2)
+            sl_price  = round(opt_price * (1 - STOP_LOSS), 2)
 
-    tp_order = {
-        "symbol"       : symbol_occ,
-        "qty"          : "1",
-        "side"         : "sell",
-        "type"         : "limit",
-        "limit_price"  : str(tp_price),
-        "time_in_force": "gtc"
-    }
+            tp_order = {
+                "symbol"       : symbol_occ,
+                "qty"          : "1",
+                "side"         : "sell",
+                "type"         : "limit",
+                "limit_price"  : str(tp_price),
+                "time_in_force": "gtc"
+            }
+            sl_order = {
+                "symbol"       : symbol_occ,
+                "qty"          : "1",
+                "side"         : "sell",
+                "type"         : "stop",
+                "stop_price"   : str(sl_price),
+                "time_in_force": "gtc"
+            }
 
-    sl_order = {
-        "symbol"       : symbol_occ,
-        "qty"          : "1",
-        "side"         : "sell",
-        "type"         : "stop",
-        "stop_price"   : str(sl_price),
-        "time_in_force": "gtc"
-    }
+            tp_r = requests.post(f"{ALPACA_BASE}/v2/orders", json=tp_order, headers=HEADERS)
+            sl_r = requests.post(f"{ALPACA_BASE}/v2/orders", json=sl_order, headers=HEADERS)
 
-    tp_r = requests.post(f"{ALPACA_BASE}/v2/orders", json=tp_order, headers=HEADERS)
-    sl_r = requests.post(f"{ALPACA_BASE}/v2/orders", json=sl_order, headers=HEADERS)
+            print(f"TP {tp_price}: {tp_r.status_code}")
+            print(f"SL {sl_price}: {sl_r.status_code}")
+        else:
+            print("No filled price found")
 
-    print(f"TP response: {tp_r.status_code} - {tp_r.json()}")
-    print(f"SL response: {sl_r.status_code} - {sl_r.json()}")
-
-    return tp_price, sl_price
+    except Exception as e:
+        print(f"TP/SL error: {e}")
 
 def place_option_order(symbol, action, signal_time=None):
-    print(f"Placing order: {action} {symbol} @ {signal_time}")
+    print(f"Signal: {action} {symbol} @ {signal_time}")
 
     price  = get_latest_price(symbol)
     expiry = get_expiry_from_signal(signal_time)
@@ -86,7 +89,7 @@ def place_option_order(symbol, action, signal_time=None):
     right  = 'C' if action == 'CALL' else 'P'
 
     symbol_occ = f"{symbol}{expiry.strftime('%y%m%d')}{right}{int(strike*1000):08d}"
-    print(f"OCC Symbol: {symbol_occ}")
+    print(f"OCC: {symbol_occ}")
 
     order = {
         "symbol"       : symbol_occ,
@@ -96,21 +99,15 @@ def place_option_order(symbol, action, signal_time=None):
         "time_in_force": "day"
     }
 
-    url = f"{ALPACA_BASE}/v2/orders"
-    r   = requests.post(url, json=order, headers=HEADERS)
+    r      = requests.post(f"{ALPACA_BASE}/v2/orders", json=order, headers=HEADERS)
     result = r.json()
-
-    print(f"Buy response: {r.status_code} - {result}")
-
-    tp_price = None
-    sl_price = None
+    print(f"Buy: {r.status_code}")
 
     if r.status_code in [200, 201]:
-        order_id  = result.get('id')
-        opt_price = get_filled_price(order_id)
-
-        if opt_price:
-            tp_price, sl_price = place_tp_sl(symbol_occ, opt_price)
+        order_id = result.get('id')
+        t = threading.Thread(target=place_tp_sl, args=(symbol_occ, order_id))
+        t.daemon = True
+        t.start()
 
     return {
         'symbol'    : symbol,
@@ -119,8 +116,6 @@ def place_option_order(symbol, action, signal_time=None):
         'strike'    : strike,
         'expiry'    : str(expiry),
         'occ_symbol': symbol_occ,
-        'tp'        : tp_price,
-        'sl'        : sl_price,
         'status'    : r.status_code,
         'result'    : result
     }
@@ -138,27 +133,23 @@ def test():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        data = request.get_json(force=True, silent=True) or {}
-        print(f"Received webhook: {data}")
-
+        data        = request.get_json(force=True, silent=True) or {}
+        print(f"Webhook: {data}")
         action      = data.get('action', '')
         symbol      = data.get('symbol', 'SPY')
         signal_time = data.get('time', None)
-
-        print(f"Action: {action}, Symbol: {symbol}, Time: {signal_time}")
 
         if symbol not in ['SPY', 'QQQ', 'XSP']:
             symbol = 'SPY'
 
         if not action:
-            print("No action found!")
             return jsonify({'status': 'error', 'message': 'no action'}), 400
 
         result = place_option_order(symbol, action, signal_time)
         return jsonify({'status': 'success', 'data': result})
 
     except Exception as e:
-        print(f"Webhook error: {e}")
+        print(f"Error: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 if __name__ == '__main__':
