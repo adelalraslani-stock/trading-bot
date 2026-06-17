@@ -20,7 +20,7 @@ HEADERS = {
 
 # ==============================
 # سجل البوزيشنز النشطة لكل رمز
-# مفتاح: symbol (SPY/QQQ/XSP)
+# مفتاح: symbol (SPY/QQQ)
 # قيمة: {occ_symbol, action, tp_id, sl_id}
 # ==============================
 active_positions = {}
@@ -31,9 +31,7 @@ positions_lock   = threading.Lock()
 # ==============================
 def get_latest_price(symbol):
     try:
-        # XSP سعره قريب من SPY — نجيب SPY مباشرة
-        fetch_symbol = 'SPY' if symbol == 'XSP' else symbol
-        url = f"https://data.alpaca.markets/v2/stocks/{fetch_symbol}/quotes/latest"
+        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/quotes/latest"
         r   = requests.get(url, headers=HEADERS, timeout=10)
         return float(r.json()['quote']['ap'])
     except Exception as e:
@@ -351,7 +349,7 @@ def webhook():
         symbol      = data.get('symbol', 'SPY').upper()
         signal_time = data.get('time', None)
 
-        if symbol not in ['SPY', 'QQQ', 'XSP']:
+        if symbol not in ['SPY', 'QQQ']:
             symbol = 'SPY'
 
         if action not in ['CALL', 'PUT']:
