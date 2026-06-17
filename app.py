@@ -31,9 +31,13 @@ positions_lock   = threading.Lock()
 # ==============================
 def get_latest_price(symbol):
     try:
-        url = f"https://data.alpaca.markets/v2/stocks/{symbol}/quotes/latest"
+        fetch_symbol = 'SPY' if symbol == 'XSP' else symbol
+        url = f"https://data.alpaca.markets/v2/stocks/{fetch_symbol}/quotes/latest"
         r   = requests.get(url, headers=HEADERS, timeout=10)
-        return float(r.json()['quote']['ap'])
+        price = float(r.json()['quote']['ap'])
+        if symbol == 'XSP':
+            price = round(price * 10, 2)
+        return price
     except Exception as e:
         print(f"[Price Error] {e}")
         return 500.00
