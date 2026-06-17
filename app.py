@@ -124,56 +124,69 @@ def close_position(symbol):
 # ==============================
 # مراقبة الـ TP و SL
 # ==============================
-def monitor_tp_sl(symbol, symbol_occ, tp_id, sl_id):
+def monitor_tp_sl(symbol, symbol_occ, tp_id, entry_price):
     print(f"[Monitor] Started for {symbol_occ}")
-    max_checks = 120
+    sl_price  = round(entry_price * (1 - STOP_LOSS_PCT), 2)
+    max_checks = 240  # يراقب لمدة 4 ساعات
     checks     = 0
 
     while checks < max_checks:
-        time.sleep(60)
+        time.sleep(30)  # كل 30 ثانية
         checks += 1
 
-        # تحقق إذا البوزيشن اتغيرت (إشارة عكسية أغلقتها)
+        # تحقق إذا البوزيشن اتغيرت
         with positions_lock:
             pos = active_positions.get(symbol)
             if not pos or pos['occ_symbol'] != symbol_occ:
-                print(f"[Monitor] Position changed or closed. Stopping monitor for {symbol_occ}")
+                print(f"[Monitor] Position changed. Stopping for {symbol_occ}")
                 break
 
         try:
-            tp_r = requests.get(f"{ALPACA_BASE}/v2/orders/{tp_id}", headers=HEADERS, timeout=10).json()
-            sl_r = requests.get(f"{ALPACA_BASE}/v2/orders/{sl_id}", headers=HEADERS, timeout=10).json()
-
+            # تحقق من الـ TP
+            tp_r      = requests.get(f"{ALPACA_BASE}/v2/orders/{tp_id}", headers=HEADERS, timeout=10).json()
             tp_status = tp_r.get('status', '')
-            sl_status = sl_r.get('status', '')
-
-            print(f"[Monitor] {symbol_occ} TP={tp_status} | SL={sl_status}")
+            print(f"[Monitor] {symbol_occ} TP={tp_status}")
 
             if tp_status == 'filled':
-                print(f"[Monitor] TP filled! Cancelling SL")
-                cancel_order(sl_id)
-                with positions_lock:
-                    active_positions.pop(symbol, None)
-                break
-
-            elif sl_status == 'filled':
-                print(f"[Monitor] SL filled! Cancelling TP")
-                cancel_order(tp_id)
+                print(f"[Monitor] TP filled!")
                 with positions_lock:
                     active_positions.pop(symbol, None)
                 break
 
             elif tp_status in ['cancelled', 'canceled', 'expired']:
-                cancel_order(sl_id)
+                print(f"[Monitor] TP cancelled/expired")
                 with positions_lock:
                     active_positions.pop(symbol, None)
                 break
 
-            elif sl_status in ['cancelled', 'canceled', 'expired']:
-                cancel_order(tp_id)
-                with positions_lock:
-                    active_positions.pop(symbol, None)
-                break
+            # تحقق من السعر الحالي للـ SL
+            try:
+                quote_url = f"https://data.alpaca.markets/v2/options/{symbol_occ}/quotes/latest"
+                q_r       = requests.get(quote_url, headers=HEADERS, timeout=10)
+                if q_r.status_code == 200:
+                    current_price = float(q_r.json().get('quote', {}).get('bp', 0))
+                    print(f"[Monitor] Current={current_price} | SL={sl_price}")
+
+                    if current_price > 0 and current_price <= sl_price:
+                        print(f"[Monitor] SL triggered! Price={current_price} <= {sl_price}")
+                        # إلغاء الـ TP أولاً
+                        cancel_order(tp_id)
+                        time.sleep(1)
+                        # بيع بسعر السوق
+                        sl_market = {
+                            "symbol"       : symbol_occ,
+                            "qty"          : "5",
+                            "side"         : "sell",
+                            "type"         : "market",
+                            "time_in_force": "day"
+                        }
+                        r = requests.post(f"{ALPACA_BASE}/v2/orders", json=sl_market, headers=HEADERS, timeout=10)
+                        print(f"[SL Market] Status={r.status_code}")
+                        with positions_lock:
+                            active_positions.pop(symbol, None)
+                        break
+            except Exception as e:
+                print(f"[SL Check Error] {e}")
 
         except Exception as e:
             print(f"[Monitor Error] {e}")
@@ -208,6 +221,7 @@ def place_tp_sl(symbol, symbol_occ, order_id):
 
     print(f"[TP/SL] Entry={opt_price} | TP={tp_price} | SL={sl_price}")
 
+    # TP فقط عبر Alpaca
     tp_order = {
         "symbol"       : symbol_occ,
         "qty"          : "5",
@@ -216,36 +230,24 @@ def place_tp_sl(symbol, symbol_occ, order_id):
         "limit_price"  : str(tp_price),
         "time_in_force": "day"
     }
-    sl_order = {
-        "symbol"       : symbol_occ,
-        "qty"          : "5",
-        "side"         : "sell",
-        "type"         : "stop",
-        "stop_price"   : str(sl_price),
-        "time_in_force": "day"
-    }
 
-    tp_r = requests.post(f"{ALPACA_BASE}/v2/orders", json=tp_order, headers=HEADERS, timeout=10)
-    sl_r = requests.post(f"{ALPACA_BASE}/v2/orders", json=sl_order, headers=HEADERS, timeout=10)
+    tp_r  = requests.post(f"{ALPACA_BASE}/v2/orders", json=tp_order, headers=HEADERS, timeout=10)
+    tp_id = tp_r.json().get('id') if tp_r.status_code in [200, 201] else None
 
     print(f"[TP] {tp_price}: {tp_r.status_code}")
-    print(f"[SL] {sl_price}: {sl_r.status_code}")
+    print(f"[SL] داخلي عند {sl_price} — مراقبة كل 30 ثانية")
 
-    tp_id = tp_r.json().get('id') if tp_r.status_code in [200, 201] else None
-    sl_id = sl_r.json().get('id') if sl_r.status_code in [200, 201] else None
-
-    if tp_id and sl_id:
+    if tp_id:
         with positions_lock:
-            # تحقق إذا البوزيشن لا تزال نفسها (ما اتغيرت بإشارة عكسية)
             pos = active_positions.get(symbol)
             if pos and pos['occ_symbol'] == symbol_occ:
                 pos['tp_id'] = tp_id
-                pos['sl_id'] = sl_id
                 pos['entry'] = opt_price
                 pos['tp']    = tp_price
                 pos['sl']    = sl_price
 
-        t = threading.Thread(target=monitor_tp_sl, args=(symbol, symbol_occ, tp_id, sl_id))
+        # مراقبة السعر للـ SL داخلياً
+        t = threading.Thread(target=monitor_tp_sl, args=(symbol, symbol_occ, tp_id, opt_price))
         t.daemon = True
         t.start()
 
