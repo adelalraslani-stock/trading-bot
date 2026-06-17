@@ -19,10 +19,12 @@ HEADERS = {
 }
 
 # ==============================
-# سجل الأوردرات النشطة (symbol -> {main_id, tp_id, sl_id})
+# سجل البوزيشنز النشطة لكل رمز
+# مفتاح: symbol (SPY/QQQ/XSP)
+# قيمة: {occ_symbol, action, tp_id, sl_id}
 # ==============================
-active_orders = {}
-orders_lock   = threading.Lock()
+active_positions = {}
+positions_lock   = threading.Lock()
 
 # ==============================
 # جلب أحدث سعر للسهم
@@ -38,8 +40,6 @@ def get_latest_price(symbol):
 
 # ==============================
 # تحديد تاريخ انتهاء الأوبشن
-# إذا قبل 3:30 PM بتوقيت نيويورك → نفس اليوم
-# إذا بعدها → اليوم التالي (يوم عمل)
 # ==============================
 def get_expiry(signal_time=None):
     try:
@@ -48,15 +48,14 @@ def get_expiry(signal_time=None):
         else:
             signal_dt = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
 
-        ny_time = signal_dt - datetime.timedelta(hours=4)  # UTC-4 (EDT)
+        ny_time = signal_dt - datetime.timedelta(hours=4)
         cutoff  = ny_time.replace(hour=15, minute=30, second=0, microsecond=0)
 
         if ny_time < cutoff:
             expiry = ny_time.date()
         else:
-            # اليوم التالي مع تخطي الويكند
             next_day = ny_time.date() + datetime.timedelta(days=1)
-            while next_day.weekday() >= 5:  # 5=Sat, 6=Sun
+            while next_day.weekday() >= 5:
                 next_day += datetime.timedelta(days=1)
             expiry = next_day
 
@@ -83,16 +82,63 @@ def cancel_order(order_id):
         print(f"[Cancel Error] {e}")
 
 # ==============================
-# مراقبة الـ TP و SL — يلغي الثاني لما الأول يتنفذ
+# إغلاق البوزيشن الحالية فوراً عند إشارة عكسية
 # ==============================
-def monitor_tp_sl(symbol_occ, tp_id, sl_id):
+def close_position(symbol):
+    with positions_lock:
+        pos = active_positions.get(symbol)
+        if not pos:
+            return False
+
+        occ_symbol = pos['occ_symbol']
+        tp_id      = pos.get('tp_id')
+        sl_id      = pos.get('sl_id')
+
+    print(f"[Reverse] Closing {occ_symbol} due to reverse signal")
+
+    # إلغاء الـ TP و SL أولاً
+    if tp_id:
+        cancel_order(tp_id)
+    if sl_id:
+        cancel_order(sl_id)
+
+    time.sleep(1)
+
+    # بيع البوزيشن بسعر السوق فوراً
+    close_order = {
+        "symbol"       : occ_symbol,
+        "qty"          : "1",
+        "side"         : "sell",
+        "type"         : "market",
+        "time_in_force": "day"
+    }
+    r = requests.post(f"{ALPACA_BASE}/v2/orders", json=close_order, headers=HEADERS, timeout=10)
+    print(f"[Reverse] Close status: {r.status_code} | {r.json().get('status','')}")
+
+    # مسح البوزيشن من السجل
+    with positions_lock:
+        active_positions.pop(symbol, None)
+
+    return True
+
+# ==============================
+# مراقبة الـ TP و SL
+# ==============================
+def monitor_tp_sl(symbol, symbol_occ, tp_id, sl_id):
     print(f"[Monitor] Started for {symbol_occ}")
-    max_checks = 120   # يراقب لمدة ساعتين (كل دقيقة)
+    max_checks = 120
     checks     = 0
 
     while checks < max_checks:
         time.sleep(60)
         checks += 1
+
+        # تحقق إذا البوزيشن اتغيرت (إشارة عكسية أغلقتها)
+        with positions_lock:
+            pos = active_positions.get(symbol)
+            if not pos or pos['occ_symbol'] != symbol_occ:
+                print(f"[Monitor] Position changed or closed. Stopping monitor for {symbol_occ}")
+                break
 
         try:
             tp_r = requests.get(f"{ALPACA_BASE}/v2/orders/{tp_id}", headers=HEADERS, timeout=10).json()
@@ -101,33 +147,32 @@ def monitor_tp_sl(symbol_occ, tp_id, sl_id):
             tp_status = tp_r.get('status', '')
             sl_status = sl_r.get('status', '')
 
-            print(f"[Monitor] TP={tp_status} | SL={sl_status}")
+            print(f"[Monitor] {symbol_occ} TP={tp_status} | SL={sl_status}")
 
-            # لو TP اتنفذ → ألغي SL
             if tp_status == 'filled':
-                print(f"[Monitor] TP filled! Cancelling SL {sl_id}")
+                print(f"[Monitor] TP filled! Cancelling SL")
                 cancel_order(sl_id)
-                with orders_lock:
-                    active_orders.pop(symbol_occ, None)
+                with positions_lock:
+                    active_positions.pop(symbol, None)
                 break
 
-            # لو SL اتنفذ → ألغي TP
             elif sl_status == 'filled':
-                print(f"[Monitor] SL filled! Cancelling TP {tp_id}")
+                print(f"[Monitor] SL filled! Cancelling TP")
                 cancel_order(tp_id)
-                with orders_lock:
-                    active_orders.pop(symbol_occ, None)
+                with positions_lock:
+                    active_positions.pop(symbol, None)
                 break
 
-            # لو أحدهم اتلغى من قِبل نفسه
             elif tp_status in ['cancelled', 'canceled', 'expired']:
-                print(f"[Monitor] TP cancelled/expired. Cancelling SL.")
                 cancel_order(sl_id)
+                with positions_lock:
+                    active_positions.pop(symbol, None)
                 break
 
             elif sl_status in ['cancelled', 'canceled', 'expired']:
-                print(f"[Monitor] SL cancelled/expired. Cancelling TP.")
                 cancel_order(tp_id)
+                with positions_lock:
+                    active_positions.pop(symbol, None)
                 break
 
         except Exception as e:
@@ -136,16 +181,15 @@ def monitor_tp_sl(symbol_occ, tp_id, sl_id):
     print(f"[Monitor] Done for {symbol_occ}")
 
 # ==============================
-# وضع TP و SL بعد تنفيذ الأوردر الرئيسي
+# وضع TP و SL بعد تنفيذ الأوردر
 # ==============================
-def place_tp_sl(symbol_occ, order_id):
-    # ننتظر للحصول على سعر التنفيذ
+def place_tp_sl(symbol, symbol_occ, order_id):
     filled_price = None
     for attempt in range(5):
         time.sleep(3)
         try:
-            r = requests.get(f"{ALPACA_BASE}/v2/orders/{order_id}", headers=HEADERS, timeout=10)
-            data = r.json()
+            r            = requests.get(f"{ALPACA_BASE}/v2/orders/{order_id}", headers=HEADERS, timeout=10)
+            data         = r.json()
             filled_price = data.get('filled_avg_price')
             status       = data.get('status', '')
             print(f"[TP/SL] Attempt {attempt+1}: status={status}, filled={filled_price}")
@@ -155,7 +199,7 @@ def place_tp_sl(symbol_occ, order_id):
             print(f"[TP/SL Error] {e}")
 
     if not filled_price:
-        print(f"[TP/SL] No fill price after 5 attempts. Skipping.")
+        print(f"[TP/SL] No fill price. Skipping.")
         return
 
     opt_price = float(filled_price)
@@ -164,68 +208,72 @@ def place_tp_sl(symbol_occ, order_id):
 
     print(f"[TP/SL] Entry={opt_price} | TP={tp_price} | SL={sl_price}")
 
-    # أوردر TP
     tp_order = {
         "symbol"       : symbol_occ,
         "qty"          : "1",
         "side"         : "sell",
         "type"         : "limit",
         "limit_price"  : str(tp_price),
-        "time_in_force": "day"   # ينتهي مع نهاية يوم التداول
+        "time_in_force": "day"
     }
-
-    # أوردر SL
     sl_order = {
         "symbol"       : symbol_occ,
         "qty"          : "1",
         "side"         : "sell",
         "type"         : "stop",
         "stop_price"   : str(sl_price),
-        "time_in_force": "day"   # ينتهي مع نهاية يوم التداول
+        "time_in_force": "day"
     }
 
     tp_r = requests.post(f"{ALPACA_BASE}/v2/orders", json=tp_order, headers=HEADERS, timeout=10)
     sl_r = requests.post(f"{ALPACA_BASE}/v2/orders", json=sl_order, headers=HEADERS, timeout=10)
 
-    print(f"[TP] {tp_price}: status={tp_r.status_code} | {tp_r.json().get('status','')}")
-    print(f"[SL] {sl_price}: status={sl_r.status_code} | {sl_r.json().get('status','')}")
+    print(f"[TP] {tp_price}: {tp_r.status_code}")
+    print(f"[SL] {sl_price}: {sl_r.status_code}")
 
     tp_id = tp_r.json().get('id') if tp_r.status_code in [200, 201] else None
     sl_id = sl_r.json().get('id') if sl_r.status_code in [200, 201] else None
 
     if tp_id and sl_id:
-        with orders_lock:
-            active_orders[symbol_occ] = {
-                'main_id': order_id,
-                'tp_id'  : tp_id,
-                'sl_id'  : sl_id,
-                'entry'  : opt_price,
-                'tp'     : tp_price,
-                'sl'     : sl_price
-            }
+        with positions_lock:
+            # تحقق إذا البوزيشن لا تزال نفسها (ما اتغيرت بإشارة عكسية)
+            pos = active_positions.get(symbol)
+            if pos and pos['occ_symbol'] == symbol_occ:
+                pos['tp_id'] = tp_id
+                pos['sl_id'] = sl_id
+                pos['entry'] = opt_price
+                pos['tp']    = tp_price
+                pos['sl']    = sl_price
 
-        # بدء المراقبة في thread منفصل
-        t = threading.Thread(target=monitor_tp_sl, args=(symbol_occ, tp_id, sl_id))
+        t = threading.Thread(target=monitor_tp_sl, args=(symbol, symbol_occ, tp_id, sl_id))
         t.daemon = True
         t.start()
 
 # ==============================
-# الدالة الرئيسية لتنفيذ أوردر الأوبشن
+# الدالة الرئيسية
 # ==============================
 def place_option_order(symbol, action, signal_time=None):
     print(f"\n{'='*50}")
     print(f"[Signal] {action} {symbol} @ {signal_time}")
 
+    # ==============================
+    # تحقق من إشارة عكسية
+    # ==============================
+    with positions_lock:
+        existing = active_positions.get(symbol)
+
+    if existing and existing['action'] != action:
+        print(f"[Reverse] Opposite signal! Current={existing['action']} New={action}")
+        close_position(symbol)
+        time.sleep(2)  # انتظر قليلاً قبل الدخول الجديد
+
     price  = get_latest_price(symbol)
     expiry = get_expiry(signal_time)
     strike = round(price)
 
-    # QQQ: سترايك +2 للـ CALL و -2 للـ PUT (عشان العقد يكون أرخص)
+    # QQQ: سترايك +2 للـ CALL و -2 للـ PUT
     if symbol == 'QQQ':
-        if action == 'CALL':
-            strike = strike + 2
-        else:
-            strike = strike - 2
+        strike = strike + 2 if action == 'CALL' else strike - 2
 
     symbol_occ = build_occ_symbol(symbol, expiry, action, strike)
     print(f"[OCC] {symbol_occ} | Price={price} | Strike={strike} | Expiry={expiry}")
@@ -244,7 +292,17 @@ def place_option_order(symbol, action, signal_time=None):
 
     if r.status_code in [200, 201]:
         order_id = result.get('id')
-        t = threading.Thread(target=place_tp_sl, args=(symbol_occ, order_id))
+
+        # سجل البوزيشن الجديدة فوراً
+        with positions_lock:
+            active_positions[symbol] = {
+                'occ_symbol': symbol_occ,
+                'action'    : action,
+                'tp_id'     : None,
+                'sl_id'     : None
+            }
+
+        t = threading.Thread(target=place_tp_sl, args=(symbol, symbol_occ, order_id))
         t.daemon = True
         t.start()
 
@@ -265,20 +323,18 @@ def place_option_order(symbol, action, signal_time=None):
 
 @app.route('/')
 def home():
-    return 'Trading Bot v2 is Running ✅'
+    return 'Trading Bot v3 is Running ✅'
 
 @app.route('/status')
 def status():
-    """عرض الأوردرات النشطة حالياً"""
-    with orders_lock:
+    with positions_lock:
         return jsonify({
-            'active_orders': active_orders,
-            'count'        : len(active_orders)
+            'active_positions': active_positions,
+            'count'           : len(active_positions)
         })
 
 @app.route('/test')
 def test():
-    """تجربة بدون webhook"""
     now    = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
     result = place_option_order('SPY', 'CALL', now)
     return jsonify(result)
@@ -293,11 +349,9 @@ def webhook():
         symbol      = data.get('symbol', 'SPY').upper()
         signal_time = data.get('time', None)
 
-        # التحقق من الرمز المسموح به
         if symbol not in ['SPY', 'QQQ', 'XSP']:
             symbol = 'SPY'
 
-        # التحقق من الإشارة
         if action not in ['CALL', 'PUT']:
             return jsonify({'status': 'error', 'message': f'Invalid action: {action}'}), 400
 
