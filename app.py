@@ -107,7 +107,7 @@ def close_position(symbol):
     # بيع البوزيشن بسعر السوق فوراً
     close_order = {
         "symbol"       : occ_symbol,
-        "qty"          : "1",
+        "qty"          : "5",
         "side"         : "sell",
         "type"         : "market",
         "time_in_force": "day"
@@ -210,7 +210,7 @@ def place_tp_sl(symbol, symbol_occ, order_id):
 
     tp_order = {
         "symbol"       : symbol_occ,
-        "qty"          : "1",
+        "qty"          : "5",
         "side"         : "sell",
         "type"         : "limit",
         "limit_price"  : str(tp_price),
@@ -218,7 +218,7 @@ def place_tp_sl(symbol, symbol_occ, order_id):
     }
     sl_order = {
         "symbol"       : symbol_occ,
-        "qty"          : "1",
+        "qty"          : "5",
         "side"         : "sell",
         "type"         : "stop",
         "stop_price"   : str(sl_price),
@@ -280,7 +280,7 @@ def place_option_order(symbol, action, signal_time=None):
 
     order = {
         "symbol"       : symbol_occ,
-        "qty"          : "1",
+        "qty"          : "5",
         "side"         : "buy",
         "type"         : "market",
         "time_in_force": "day"
