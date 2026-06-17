@@ -220,6 +220,13 @@ def place_option_order(symbol, action, signal_time=None):
     expiry = get_expiry(signal_time)
     strike = round(price)
 
+    # QQQ: سترايك +2 للـ CALL و -2 للـ PUT (عشان العقد يكون أرخص)
+    if symbol == 'QQQ':
+        if action == 'CALL':
+            strike = strike + 2
+        else:
+            strike = strike - 2
+
     symbol_occ = build_occ_symbol(symbol, expiry, action, strike)
     print(f"[OCC] {symbol_occ} | Price={price} | Strike={strike} | Expiry={expiry}")
 
