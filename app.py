@@ -341,6 +341,23 @@ def test():
     result = place_option_order('SPY', 'CALL', now)
     return jsonify(result)
 
+def is_opening_range(signal_time=None):
+    """أول 15 دقيقة من افتتاح السوق (9:30 - 9:45 AM ET) = True"""
+    try:
+        if signal_time:
+            signal_dt = datetime.datetime.fromisoformat(signal_time.replace('Z', '+00:00'))
+        else:
+            signal_dt = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
+
+        ny_time     = signal_dt - datetime.timedelta(hours=4)  # UTC-4 (EDT)
+        market_open = ny_time.replace(hour=9, minute=30, second=0, microsecond=0)
+        cutoff      = ny_time.replace(hour=9, minute=45, second=0, microsecond=0)
+
+        return market_open <= ny_time < cutoff
+    except Exception as e:
+        print(f"[Opening Range Error] {e}")
+        return False
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
@@ -356,6 +373,11 @@ def webhook():
 
         if action not in ['CALL', 'PUT']:
             return jsonify({'status': 'error', 'message': f'Invalid action: {action}'}), 400
+
+        # تجاهل الإشارات في أول 15 دقيقة من افتتاح السوق
+        if is_opening_range(signal_time):
+            print(f"[Opening Range] Ignoring signal — first 15 min of market open")
+            return jsonify({'status': 'ignored', 'message': 'Opening range — first 15 min ignored'})
 
         result = place_option_order(symbol, action, signal_time)
         return jsonify({'status': 'success', 'data': result})
