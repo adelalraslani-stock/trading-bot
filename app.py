@@ -67,25 +67,32 @@ def build_occ_symbol(symbol, expiry, action, strike):
 # فلتر الوقت — يتجاهل أول 15 دقيقة وآخر ساعة
 # ==============================
 def should_ignore_signal(signal_time=None):
+    """
+    يتجاهل الإشارات في:
+    1. أول 15 دقيقة من الافتتاح (9:30 - 9:45 AM ET) = (4:30 - 4:45 PM السعودية)
+    2. من 2:30 PM ET إلى إغلاق السوق (= 9:30 PM السعودية وحتى نهاية اليوم)
+       يعني آخر صفقة ممكنة هي قبل الساعة 9:30 مساءً بتوقيت السعودية
+    """
     try:
         if signal_time:
             signal_dt = datetime.datetime.fromisoformat(signal_time.replace('Z', '+00:00'))
         else:
             signal_dt = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
 
-        ny_time = signal_dt - datetime.timedelta(hours=4)
+        ny_time = signal_dt - datetime.timedelta(hours=4)  # UTC-4 (EDT)
 
         opening_start = ny_time.replace(hour=9,  minute=30, second=0, microsecond=0)
         opening_end   = ny_time.replace(hour=9,  minute=45, second=0, microsecond=0)
-        closing_start = ny_time.replace(hour=15, minute=0,  second=0, microsecond=0)
+        # 9:30 PM السعودية = 2:30 PM ET
+        closing_start = ny_time.replace(hour=14, minute=30, second=0, microsecond=0)
         closing_end   = ny_time.replace(hour=16, minute=0,  second=0, microsecond=0)
 
         if opening_start <= ny_time < opening_end:
-            print(f"[Filter] Opening range 9:30-9:45 AM ET — ignored")
+            print(f"[Filter] Opening range 9:30-9:45 AM ET (4:30-4:45 PM KSA) — ignored")
             return True
 
         if closing_start <= ny_time < closing_end:
-            print(f"[Filter] Closing hour 3:00-4:00 PM ET — ignored")
+            print(f"[Filter] Closing range 2:30-4:00 PM ET (9:30-11:00 PM KSA) — ignored")
             return True
 
         return False
