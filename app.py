@@ -25,10 +25,14 @@ def get_latest_price(symbol):
     try:
         url = f"https://data.alpaca.markets/v2/stocks/{symbol}/quotes/latest"
         r   = requests.get(url, headers=HEADERS, timeout=10)
-        return float(r.json()['quote']['ap'])
+        price = float(r.json()['quote']['ap'])
+        if price <= 0:
+            print(f"[Price Error] Invalid price returned: {price}")
+            return None
+        return price
     except Exception as e:
-        print(f"[Price Error] {e}")
-        return 500.00
+        print(f"[Price Error] Failed to fetch price for {symbol}: {e}")
+        return None
 
 # ==============================
 # تحديد تاريخ انتهاء الأوبشن
@@ -316,6 +320,11 @@ def place_option_order(symbol, action, signal_time=None):
     # فتح صفقة جديدة
     # ==============================
     price  = get_latest_price(symbol)
+
+    if price is None:
+        print(f"[Abort] Could not fetch price for {symbol}. Signal ignored — no trade placed.")
+        return {'status': 'error', 'message': f'Price fetch failed for {symbol} — trade aborted for safety'}
+
     expiry = get_expiry(signal_time)
     strike = round(price)
 
