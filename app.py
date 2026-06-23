@@ -74,7 +74,8 @@ def should_ignore_signal(signal_time=None):
     """
     يتجاهل الإشارات في:
     1. أول 15 دقيقة من الافتتاح (9:30 - 9:45 AM ET) = (4:30 - 4:45 PM السعودية)
-    2. من 2:30 PM ET إلى إغلاق السوق (= 9:30 PM السعودية وحتى نهاية اليوم)
+    2. فترة الغداء (11:00 AM - 1:15 PM ET) = (6:00 - 8:15 PM السعودية)
+    3. من 2:30 PM ET إلى إغلاق السوق (= 9:30 PM السعودية وحتى نهاية اليوم)
        يعني آخر صفقة ممكنة هي قبل الساعة 9:30 مساءً بتوقيت السعودية
     """
     try:
@@ -87,12 +88,19 @@ def should_ignore_signal(signal_time=None):
 
         opening_start = ny_time.replace(hour=9,  minute=30, second=0, microsecond=0)
         opening_end   = ny_time.replace(hour=9,  minute=45, second=0, microsecond=0)
+        # فترة الغداء: 6:00-8:15 PM السعودية = 11:00 AM-1:15 PM ET
+        lunch_start   = ny_time.replace(hour=11, minute=0,  second=0, microsecond=0)
+        lunch_end     = ny_time.replace(hour=13, minute=15, second=0, microsecond=0)
         # 9:30 PM السعودية = 2:30 PM ET
         closing_start = ny_time.replace(hour=14, minute=30, second=0, microsecond=0)
         closing_end   = ny_time.replace(hour=16, minute=0,  second=0, microsecond=0)
 
         if opening_start <= ny_time < opening_end:
             print(f"[Filter] Opening range 9:30-9:45 AM ET (4:30-4:45 PM KSA) — ignored")
+            return True
+
+        if lunch_start <= ny_time < lunch_end:
+            print(f"[Filter] Lunch hour 11:00 AM-1:15 PM ET (6:00-8:15 PM KSA) — ignored")
             return True
 
         if closing_start <= ny_time < closing_end:
