@@ -72,11 +72,11 @@ def build_occ_symbol(symbol, expiry, action, strike):
 # ==============================
 def should_ignore_signal(signal_time=None):
     """
-    يتجاهل الإشارات في:
-    1. أول 15 دقيقة من الافتتاح (9:30 - 9:45 AM ET) = (4:30 - 4:45 PM السعودية)
-    2. فترة الغداء (11:00 AM - 1:15 PM ET) = (6:00 - 8:15 PM السعودية)
-    3. من 2:30 PM ET إلى إغلاق السوق (= 9:30 PM السعودية وحتى نهاية اليوم)
-       يعني آخر صفقة ممكنة هي قبل الساعة 9:30 مساءً بتوقيت السعودية
+    يسمح بالشراء فقط خلال نافذتين زمنيتين (بتوقيت السعودية):
+    1. 4:45 PM - 6:15 PM   = 9:45 - 11:15 AM ET
+    2. 8:00 PM - 10:00 PM  = 1:00 - 3:00 PM ET
+
+    أي إشارة تجي خارج هاتين النافذتين يتم تجاهلها تلقائياً.
     """
     try:
         if signal_time:
@@ -86,26 +86,22 @@ def should_ignore_signal(signal_time=None):
 
         ny_time = signal_dt - datetime.timedelta(hours=4)  # UTC-4 (EDT)
 
-        opening_start = ny_time.replace(hour=9,  minute=30, second=0, microsecond=0)
-        opening_end   = ny_time.replace(hour=9,  minute=45, second=0, microsecond=0)
-        # فترة الغداء: 6:00-8:15 PM السعودية = 11:00 AM-1:15 PM ET
-        lunch_start   = ny_time.replace(hour=11, minute=0,  second=0, microsecond=0)
-        lunch_end     = ny_time.replace(hour=13, minute=15, second=0, microsecond=0)
-        # 9:30 PM السعودية = 2:30 PM ET
-        closing_start = ny_time.replace(hour=14, minute=30, second=0, microsecond=0)
-        closing_end   = ny_time.replace(hour=16, minute=0,  second=0, microsecond=0)
+        # النافذة الأولى: 4:45-6:15 PM السعودية = 9:45-11:15 AM ET
+        window1_start = ny_time.replace(hour=9,  minute=45, second=0, microsecond=0)
+        window1_end   = ny_time.replace(hour=11, minute=15, second=0, microsecond=0)
 
-        if opening_start <= ny_time < opening_end:
-            print(f"[Filter] Opening range 9:30-9:45 AM ET (4:30-4:45 PM KSA) — ignored")
-            return True
+        # النافذة الثانية: 8:00-10:00 PM السعودية = 1:00-3:00 PM ET
+        window2_start = ny_time.replace(hour=13, minute=0,  second=0, microsecond=0)
+        window2_end   = ny_time.replace(hour=15, minute=0,  second=0, microsecond=0)
 
-        if lunch_start <= ny_time < lunch_end:
-            print(f"[Filter] Lunch hour 11:00 AM-1:15 PM ET (6:00-8:15 PM KSA) — ignored")
-            return True
+        in_window1 = window1_start <= ny_time < window1_end
+        in_window2 = window2_start <= ny_time < window2_end
 
-        if closing_start <= ny_time < closing_end:
-            print(f"[Filter] Closing range 2:30-4:00 PM ET (9:30-11:00 PM KSA) — ignored")
-            return True
+        if in_window1 or in_window2:
+            return False  # داخل نافذة مسموحة — لا تتجاهل
+
+        print(f"[Filter] Outside trading windows (4:45-6:15 PM & 8:00-10:00 PM KSA) — ignored")
+        return True
 
         return False
     except Exception as e:
