@@ -68,13 +68,13 @@ def build_occ_symbol(symbol, expiry, action, strike):
     return f"{symbol}{expiry.strftime('%y%m%d')}{right}{int(strike * 1000):08d}"
 
 # ==============================
-# فلتر الوقت — يتجاهل أول 15 دقيقة وآخر ساعة
+# فلتر الوقت — يسمح بالشراء فقط خلال نافذتين زمنيتين
 # ==============================
 def should_ignore_signal(signal_time=None):
     """
     يسمح بالشراء فقط خلال نافذتين زمنيتين (بتوقيت السعودية):
-    1. 4:45 PM - 6:15 PM   = 9:45 - 11:15 AM ET
-    2. 8:00 PM - 10:00 PM  = 1:00 - 3:00 PM ET
+    1. 4:45 PM - 6:30 PM   = 9:45 - 11:30 AM ET
+    2. 8:10 PM - 10:00 PM  = 1:10 - 3:00 PM ET
 
     أي إشارة تجي خارج هاتين النافذتين يتم تجاهلها تلقائياً.
     """
@@ -86,12 +86,12 @@ def should_ignore_signal(signal_time=None):
 
         ny_time = signal_dt - datetime.timedelta(hours=4)  # UTC-4 (EDT)
 
-        # النافذة الأولى: 4:45-6:15 PM السعودية = 9:45-11:15 AM ET
+        # النافذة الأولى: 4:45-6:30 PM السعودية = 9:45-11:30 AM ET
         window1_start = ny_time.replace(hour=9,  minute=45, second=0, microsecond=0)
-        window1_end   = ny_time.replace(hour=11, minute=15, second=0, microsecond=0)
+        window1_end   = ny_time.replace(hour=11, minute=30, second=0, microsecond=0)
 
-        # النافذة الثانية: 8:00-10:00 PM السعودية = 1:00-3:00 PM ET
-        window2_start = ny_time.replace(hour=13, minute=0,  second=0, microsecond=0)
+        # النافذة الثانية: 8:10-10:00 PM السعودية = 1:10-3:00 PM ET
+        window2_start = ny_time.replace(hour=13, minute=10, second=0, microsecond=0)
         window2_end   = ny_time.replace(hour=15, minute=0,  second=0, microsecond=0)
 
         in_window1 = window1_start <= ny_time < window1_end
@@ -100,17 +100,14 @@ def should_ignore_signal(signal_time=None):
         if in_window1 or in_window2:
             return False  # داخل نافذة مسموحة — لا تتجاهل
 
-        print(f"[Filter] Outside trading windows (4:45-6:15 PM & 8:00-10:00 PM KSA) — ignored")
+        print(f"[Filter] Outside trading windows (4:45-6:30 PM & 8:10-10:00 PM KSA) — ignored")
         return True
-
-        return False
     except Exception as e:
         print(f"[Filter Error] {e}")
         return False
 
 # ==============================
 # جلب البوزيشنات المفتوحة من Alpaca مباشرة
-# يرجع: {symbol: {occ_symbol, action, unrealized_plpc}}
 # ==============================
 def get_open_positions():
     try:
@@ -121,13 +118,10 @@ def get_open_positions():
         positions = {}
         for pos in r.json():
             sym = pos.get('symbol', '')
-            # نتعرف على الرمز الأساسي من أول 3 حروف
             for base in ['SPY', 'QQQ']:
                 if sym.startswith(base):
-                    # نعرف CALL أو PUT من الحرف بعد التاريخ
-                    # مثال: SPY260618C00748000
                     try:
-                        right = sym[9]  # الحرف التاسع = C أو P
+                        right = sym[9]
                         action = 'CALL' if right == 'C' else 'PUT'
                     except:
                         action = 'CALL'
@@ -172,11 +166,9 @@ def cancel_all_orders_for_symbol(occ_symbol):
 # ==============================
 def close_position_market(occ_symbol, qty="5"):
     try:
-        # أولاً: إلغاء كل الأوردرات المفتوحة لهذا الرمز
         cancel_all_orders_for_symbol(occ_symbol)
         time.sleep(1)
 
-        # ثانياً: بيع بسعر السوق
         close_order = {
             "symbol"       : occ_symbol,
             "qty"          : qty,
@@ -196,7 +188,7 @@ def close_position_market(occ_symbol, qty="5"):
 # ==============================
 def monitor_tp_sl(symbol, symbol_occ, tp_id, entry_price):
     print(f"[Monitor] Started for {symbol_occ}")
-    max_checks = 480   # يراقب لمدة 4 ساعات (كل 30 ثانية)
+    max_checks = 480
     checks     = 0
 
     while checks < max_checks:
@@ -204,24 +196,21 @@ def monitor_tp_sl(symbol, symbol_occ, tp_id, entry_price):
         checks += 1
 
         try:
-            # 1. تحقق من حالة الـ TP
             tp_r      = requests.get(f"{ALPACA_BASE}/v2/orders/{tp_id}", headers=HEADERS, timeout=10)
             tp_status = tp_r.json().get('status', '') if tp_r.status_code == 200 else 'unknown'
             print(f"[Monitor] {symbol_occ} | TP={tp_status} | Check={checks}")
 
             if tp_status == 'filled':
-                print(f"[Monitor] ✅ TP filled for {symbol_occ}")
+                print(f"[Monitor] TP filled for {symbol_occ}")
                 break
 
             if tp_status in ['cancelled', 'canceled', 'expired']:
                 print(f"[Monitor] TP cancelled/expired for {symbol_occ}")
                 break
 
-            # 2. تحقق من البوزيشن مباشرة من Alpaca
             pos_r = requests.get(f"{ALPACA_BASE}/v2/positions/{symbol_occ}", headers=HEADERS, timeout=10)
 
             if pos_r.status_code == 404:
-                # البوزيشن مغلقة — TP أو إشارة عكسية أغلقتها
                 print(f"[Monitor] Position already closed for {symbol_occ}")
                 break
 
@@ -231,9 +220,8 @@ def monitor_tp_sl(symbol, symbol_occ, tp_id, entry_price):
                 current_price     = float(pos_data.get('current_price', 0))
                 print(f"[Monitor] P/L={unrealized_pl_pct:.2%} | Price={current_price} | SL threshold=-{STOP_LOSS_PCT:.0%}")
 
-                # 3. تفعيل SL إذا وصلت الخسارة للحد
                 if unrealized_pl_pct <= -STOP_LOSS_PCT:
-                    print(f"[Monitor] 🔴 SL triggered! P/L={unrealized_pl_pct:.2%} — Closing {symbol_occ}")
+                    print(f"[Monitor] SL triggered! P/L={unrealized_pl_pct:.2%} — Closing {symbol_occ}")
                     close_position_market(symbol_occ)
                     break
 
@@ -246,7 +234,6 @@ def monitor_tp_sl(symbol, symbol_occ, tp_id, entry_price):
 # وضع TP بعد تنفيذ الأوردر + بدء مراقبة SL
 # ==============================
 def place_tp_and_monitor(symbol, symbol_occ, order_id):
-    # انتظر حتى يتم تنفيذ الأوردر
     filled_price = None
     for attempt in range(8):
         time.sleep(3)
@@ -271,7 +258,6 @@ def place_tp_and_monitor(symbol, symbol_occ, order_id):
 
     print(f"[TP] Entry={opt_price} | TP={tp_price} | SL={sl_price} (internal)")
 
-    # وضع أوردر الـ TP
     tp_order = {
         "symbol"       : symbol_occ,
         "qty"          : "5",
@@ -286,10 +272,8 @@ def place_tp_and_monitor(symbol, symbol_occ, order_id):
 
     if not tp_id:
         print(f"[TP] Failed to place TP order!")
-        # حتى لو فشل الـ TP، نراقب الـ SL
-        tp_id = order_id  # نستخدم الأوردر الأصلي كمرجع
+        tp_id = order_id
 
-    # بدء مراقبة الـ SL داخلياً
     t = threading.Thread(target=monitor_tp_sl, args=(symbol, symbol_occ, tp_id, opt_price))
     t.daemon = True
     t.start()
@@ -301,9 +285,6 @@ def place_option_order(symbol, action, signal_time=None):
     print(f"\n{'='*50}")
     print(f"[Signal] {action} {symbol} @ {signal_time}")
 
-    # ==============================
-    # تحقق من البوزيشنات المفتوحة مباشرة من Alpaca
-    # ==============================
     open_positions = get_open_positions()
     existing       = open_positions.get(symbol)
 
@@ -311,18 +292,13 @@ def place_option_order(symbol, action, signal_time=None):
         print(f"[Check] Open position found: {existing['occ_symbol']} | Action={existing['action']}")
 
         if existing['action'] != action:
-            # إشارة عكسية — أغلق البوزيشن الحالية
             print(f"[Reverse] Closing {existing['occ_symbol']} — opposite signal received")
             close_position_market(existing['occ_symbol'])
             time.sleep(2)
         else:
-            # نفس الاتجاه — لا تفتح صفقة جديدة
             print(f"[Skip] Same direction already open. Skipping.")
             return {'status': 'skipped', 'reason': 'same direction already open'}
 
-    # ==============================
-    # فتح صفقة جديدة
-    # ==============================
     price  = get_latest_price(symbol)
 
     if price is None:
@@ -372,7 +348,7 @@ def place_option_order(symbol, action, signal_time=None):
 
 @app.route('/')
 def home():
-    return 'Trading Bot v4 ✅'
+    return 'Trading Bot v4 - 10% TP'
 
 @app.route('/status')
 def status():
@@ -404,9 +380,8 @@ def webhook():
         if action not in ['CALL', 'PUT']:
             return jsonify({'status': 'error', 'message': f'Invalid action: {action}'}), 400
 
-        # فلتر الوقت
         if should_ignore_signal(signal_time):
-            return jsonify({'status': 'ignored', 'message': 'Opening range or closing hour — signal ignored'})
+            return jsonify({'status': 'ignored', 'message': 'Outside trading windows — signal ignored'})
 
         result = place_option_order(symbol, action, signal_time)
         return jsonify({'status': 'success', 'data': result})
