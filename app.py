@@ -8,10 +8,13 @@ ALPACA_SECRET = os.environ.get('ALPACA_SECRET')
 ALPACA_BASE   = os.environ.get('ALPACA_BASE_URL', 'https://paper-api.alpaca.markets')
 
 # ==============================
-# إعدادات الربح والخسارة
+# إعدادات الخسارة (ثابتة)
 # ==============================
-TAKE_PROFIT_PCT = 0.10   # 10% ربح
-STOP_LOSS_PCT   = 0.50   # 50% خسارة
+STOP_LOSS_PCT = 0.50   # 50% خسارة
+
+# نسب الربح لكل نافذة زمنية
+TP_WINDOW1 = 0.10   # 10% — نافذة 4:45-6:30 PM السعودية
+TP_WINDOW2 = 0.05   # 5%  — نافذة 8:10-10:00 PM السعودية
 
 HEADERS = {
     'APCA-API-KEY-ID'    : ALPACA_KEY,
@@ -68,15 +71,14 @@ def build_occ_symbol(symbol, expiry, action, strike):
     return f"{symbol}{expiry.strftime('%y%m%d')}{right}{int(strike * 1000):08d}"
 
 # ==============================
-# فلتر الوقت — يسمح بالشراء فقط خلال نافذتين زمنيتين
+# فلتر الوقت — يرجع رقم النافذة أو None إذا خارج الأوقات
 # ==============================
-def should_ignore_signal(signal_time=None):
+def get_trading_window(signal_time=None):
     """
-    يسمح بالشراء فقط خلال نافذتين زمنيتين (بتوقيت السعودية):
-    1. 4:45 PM - 6:30 PM   = 9:45 - 11:30 AM ET
-    2. 8:10 PM - 10:00 PM  = 1:10 - 3:00 PM ET
-
-    أي إشارة تجي خارج هاتين النافذتين يتم تجاهلها تلقائياً.
+    يرجع:
+    - 1 إذا داخل نافذة 4:45-6:30 PM السعودية (TP=10%)
+    - 2 إذا داخل نافذة 8:10-10:00 PM السعودية (TP=5%)
+    - None إذا خارج الأوقات المسموحة
     """
     try:
         if signal_time:
@@ -86,25 +88,28 @@ def should_ignore_signal(signal_time=None):
 
         ny_time = signal_dt - datetime.timedelta(hours=4)  # UTC-4 (EDT)
 
-        # النافذة الأولى: 4:45-6:30 PM السعودية = 9:45-11:30 AM ET
+        # النافذة الأولى: 4:45-6:30 PM السعودية = 9:45-11:30 AM ET → TP 10%
         window1_start = ny_time.replace(hour=9,  minute=45, second=0, microsecond=0)
         window1_end   = ny_time.replace(hour=11, minute=30, second=0, microsecond=0)
 
-        # النافذة الثانية: 8:10-10:00 PM السعودية = 1:10-3:00 PM ET
+        # النافذة الثانية: 8:10-10:00 PM السعودية = 1:10-3:00 PM ET → TP 5%
         window2_start = ny_time.replace(hour=13, minute=10, second=0, microsecond=0)
         window2_end   = ny_time.replace(hour=15, minute=0,  second=0, microsecond=0)
 
-        in_window1 = window1_start <= ny_time < window1_end
-        in_window2 = window2_start <= ny_time < window2_end
+        if window1_start <= ny_time < window1_end:
+            print(f"[Filter] Window 1 — 4:45-6:30 PM KSA | TP=10%")
+            return 1
 
-        if in_window1 or in_window2:
-            return False  # داخل نافذة مسموحة — لا تتجاهل
+        if window2_start <= ny_time < window2_end:
+            print(f"[Filter] Window 2 — 8:10-10:00 PM KSA | TP=5%")
+            return 2
 
-        print(f"[Filter] Outside trading windows (4:45-6:30 PM & 8:10-10:00 PM KSA) — ignored")
-        return True
+        print(f"[Filter] Outside trading windows — ignored")
+        return None
+
     except Exception as e:
         print(f"[Filter Error] {e}")
-        return False
+        return None
 
 # ==============================
 # جلب البوزيشنات المفتوحة من Alpaca مباشرة
@@ -233,7 +238,7 @@ def monitor_tp_sl(symbol, symbol_occ, tp_id, entry_price):
 # ==============================
 # وضع TP بعد تنفيذ الأوردر + بدء مراقبة SL
 # ==============================
-def place_tp_and_monitor(symbol, symbol_occ, order_id):
+def place_tp_and_monitor(symbol, symbol_occ, order_id, take_profit_pct):
     filled_price = None
     for attempt in range(8):
         time.sleep(3)
@@ -253,10 +258,10 @@ def place_tp_and_monitor(symbol, symbol_occ, order_id):
         return
 
     opt_price = float(filled_price)
-    tp_price  = round(opt_price * (1 + TAKE_PROFIT_PCT), 2)
+    tp_price  = round(opt_price * (1 + take_profit_pct), 2)
     sl_price  = round(opt_price * (1 - STOP_LOSS_PCT), 2)
 
-    print(f"[TP] Entry={opt_price} | TP={tp_price} | SL={sl_price} (internal)")
+    print(f"[TP] Entry={opt_price} | TP={tp_price} ({take_profit_pct*100:.0f}%) | SL={sl_price} (internal)")
 
     tp_order = {
         "symbol"       : symbol_occ,
@@ -281,7 +286,7 @@ def place_tp_and_monitor(symbol, symbol_occ, order_id):
 # ==============================
 # الدالة الرئيسية لتنفيذ الصفقة
 # ==============================
-def place_option_order(symbol, action, signal_time=None):
+def place_option_order(symbol, action, signal_time=None, take_profit_pct=0.10):
     print(f"\n{'='*50}")
     print(f"[Signal] {action} {symbol} @ {signal_time}")
 
@@ -327,7 +332,7 @@ def place_option_order(symbol, action, signal_time=None):
 
     if r.status_code in [200, 201]:
         order_id = result.get('id')
-        t = threading.Thread(target=place_tp_and_monitor, args=(symbol, symbol_occ, order_id))
+        t = threading.Thread(target=place_tp_and_monitor, args=(symbol, symbol_occ, order_id, take_profit_pct))
         t.daemon = True
         t.start()
 
@@ -380,10 +385,16 @@ def webhook():
         if action not in ['CALL', 'PUT']:
             return jsonify({'status': 'error', 'message': f'Invalid action: {action}'}), 400
 
-        if should_ignore_signal(signal_time):
+        # فلتر الوقت — تحديد النافذة الزمنية ونسبة الربح
+        window = get_trading_window(signal_time)
+        if window is None:
             return jsonify({'status': 'ignored', 'message': 'Outside trading windows — signal ignored'})
 
-        result = place_option_order(symbol, action, signal_time)
+        # نسبة الربح حسب النافذة
+        take_profit_pct = TP_WINDOW1 if window == 1 else TP_WINDOW2
+        print(f"[Webhook] Window={window} | TP={take_profit_pct*100:.0f}%")
+
+        result = place_option_order(symbol, action, signal_time, take_profit_pct)
         return jsonify({'status': 'success', 'data': result})
 
     except Exception as e:
