@@ -9,7 +9,8 @@ from flask import Flask, request, jsonify
 app = Flask(__name__)
 
 # ==============================
-# Config — Strategy v6.1
+# Config — Strategy v6.2
+# (نفس استراتيجية v6.1 — التعديل الوحيد: رد فوري على TradingView + حماية من الإشارات المكررة)
 # ==============================
 ALPACA_KEY    = os.environ.get('ALPACA_KEY')
 ALPACA_SECRET = os.environ.get('ALPACA_SECRET')
@@ -38,6 +39,22 @@ PORTFOLIO_PCT      = 0.65  # نسبة الدخول من قيمة المحفظة 
 MAX_TRADES_PER_DAY = 2     # حد أقصى صفقتين باليوم
 
 CHECK_INTERVAL = 30        # مراقبة كل 30 ثانية
+
+# --- حماية من الإشارات المكررة (إعادة إرسال TradingView) ---
+DEDUP_WINDOW_SEC = 90      # أي إشارة مطابقة خلال 90 ثانية تعتبر مكررة وتتجاهل
+_last_signals = {}
+_dedup_lock = threading.Lock()
+
+def is_duplicate_signal(symbol, action):
+    """يرجع True إذا نفس الإشارة (رمز+اتجاه) وصلت خلال نافذة التكرار"""
+    key = f"{symbol}:{action}"
+    now = time_module.time()
+    with _dedup_lock:
+        last = _last_signals.get(key)
+        if last is not None and (now - last) < DEDUP_WINDOW_SEC:
+            return True
+        _last_signals[key] = now
+        return False
 
 # ==============================
 # Time helpers
@@ -381,12 +398,20 @@ def place_option_order(symbol, action):
         'status': 'success'
     }
 
+def process_signal_async(symbol, action):
+    """تنفيذ الصفقة في الخلفية بعد الرد الفوري على TradingView"""
+    try:
+        result = place_option_order(symbol, action)
+        print(f"[Async Result] {symbol} {action} → {result}")
+    except Exception as e:
+        print(f"[Async Error] {symbol} {action}: {e}")
+
 # ==============================
 # Routes
 # ==============================
 @app.route('/')
 def home():
-    return 'Trading Bot v6.1 — TP 15%/5% by time | SL 30% | 65% portfolio sizing | 2 trades/day ✅'
+    return 'Trading Bot v6.2 — TP 15%/5% by time | SL 30% | 65% portfolio sizing | 2 trades/day | instant webhook ACK ✅'
 
 @app.route('/status')
 def status():
@@ -403,6 +428,7 @@ def status():
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    """يرد على TradingView فوراً (أقل من ثانية) وينفذ الصفقة في الخلفية"""
     try:
         data = request.get_json(force=True, silent=True) or {}
         print(f"[Webhook] Received: {data}")
@@ -416,8 +442,17 @@ def webhook():
         if action not in ['CALL', 'PUT']:
             return jsonify({'status': 'error', 'message': f'Invalid action: {action}'}), 400
 
-        result = place_option_order(symbol, action)
-        return jsonify(result)
+        # حماية من التكرار: إعادة إرسال TradingView لنفس الإشارة تتجاهل فوراً
+        if is_duplicate_signal(symbol, action):
+            print(f"[Dedup] Duplicate {action} {symbol} ignored")
+            return jsonify({'status': 'ignored', 'message': 'Duplicate signal (retry) ignored'})
+
+        # تنفيذ الصفقة في الخلفية والرد الفوري
+        t = threading.Thread(target=process_signal_async, args=(symbol, action))
+        t.daemon = True
+        t.start()
+
+        return jsonify({'status': 'accepted', 'message': f'{action} {symbol} received — processing'})
 
     except Exception as e:
         print(f"[Webhook Error] {e}")
