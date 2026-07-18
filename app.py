@@ -23,22 +23,40 @@ HEADERS = {
     'Content-Type': 'application/json'
 }
 
-# --- Trading hours (Saudi time = UTC+3) ---
-ENTRY_START   = time(16, 45)   # 4:45 PM  — بداية الدخول
-TP_SWITCH     = time(19, 1)    # 7:01 PM  — التحول من TP 15% إلى TP 5%
-ENTRY_END     = time(21, 20)   # 9:20 PM  — آخر دخول
-FORCE_CLOSE   = time(21, 30)   # 9:30 PM  — إغلاق إجباري لأي مركز مفتوح
+# --- Trading windows (Saudi time = UTC+3) — v7 month test ---
+W1_START = time(16, 40)   # 4:40 PM — بداية النافذة الأولى
+W1_END   = time(18, 15)   # 6:15 PM — نهاية النافذة الأولى
+W2_START = time(20, 0)    # 8:00 PM — بداية النافذة الثانية
+W2_END   = time(21, 0)    # 9:00 PM — نهاية النافذة الثانية
+FORCE_CLOSE = time(21, 30)  # 9:30 PM — إغلاق إجباري لأي مركز مفتوح (حماية)
 
 # --- Profit / Loss ---
-TP_EARLY = 0.15    # ربح 15% للصفقات الداخلة 4:45 – 7:00
-TP_LATE  = 0.05    # ربح 5%  للصفقات الداخلة 7:01 – 9:20
-SL_PCT   = 0.30    # وقف خسارة 30%
+TP_W1  = 0.15    # ربح 15% لصفقة النافذة الأولى
+TP_W2  = 0.05    # ربح 5% لصفقة النافذة الثانية
+SL_PCT = 0.60    # وقف خسارة 60%
 
 # --- Position sizing & limits ---
-PORTFOLIO_PCT      = 0.65  # نسبة الدخول من قيمة المحفظة لكل صفقة
-MAX_TRADES_PER_DAY = 2     # حد أقصى صفقتين باليوم
+PORTFOLIO_PCT       = 0.60  # الدخول 60% من قيمة المحفظة
+MAX_TRADES_PER_WIN  = 1     # صفقة واحدة فقط لكل نافذة
+
+# --- قواعد إيقاف اليوم ---
+# 1) أي صفقة تضرب وقف الخسارة → إيقاف التداول لبقية اليوم (يوم متقلب)
+# 2) إشارة عكسية وصفقة مفتوحة → إغلاق الصفقة فوراً + إيقاف بقية اليوم
 
 CHECK_INTERVAL = 30        # مراقبة كل 30 ثانية
+
+# --- حالة إيقاف اليوم (بعد وقف خسارة أو إشارة عكسية) ---
+_day_stop = {'date': None}
+_day_stop_lock = threading.Lock()
+
+def set_day_stopped(reason):
+    with _day_stop_lock:
+        _day_stop['date'] = saudi_now().date()
+    print(f"[DayStop] Trading stopped for the rest of today — {reason}")
+
+def is_day_stopped():
+    with _day_stop_lock:
+        return _day_stop['date'] == saudi_now().date()
 
 # --- حماية من الإشارات المكررة (إعادة إرسال TradingView) ---
 DEDUP_WINDOW_SEC = 90      # أي إشارة مطابقة خلال 90 ثانية تعتبر مكررة وتتجاهل
@@ -62,14 +80,14 @@ def is_duplicate_signal(symbol, action):
 def saudi_now():
     return datetime.datetime.utcnow() + timedelta(hours=3)
 
-def get_tp_for_entry():
-    """يرجع نسبة الربح حسب وقت الدخول، أو None إذا خارج وقت التداول"""
+def get_current_window():
+    """يرجع (رقم النافذة، نسبة الربح) أو (None, None) إذا خارج النوافذ"""
     t = saudi_now().time()
-    if ENTRY_START <= t < TP_SWITCH:
-        return TP_EARLY
-    if TP_SWITCH <= t <= ENTRY_END:
-        return TP_LATE
-    return None
+    if W1_START <= t < W1_END:
+        return 1, TP_W1
+    if W2_START <= t < W2_END:
+        return 2, TP_W2
+    return None, None
 
 def is_force_close_time():
     return saudi_now().time() >= FORCE_CLOSE
@@ -78,7 +96,8 @@ def is_force_close_time():
 # Daily trade counter
 # (يقرأ من Alpaca مباشرة — ما يتأثر بإعادة تشغيل السيرفر)
 # ==============================
-def get_today_trade_count():
+def get_window_trade_count(window):
+    """يعد صفقات الشراء المنفذة اليوم داخل نافذة معينة (يقرأ من Alpaca — يصمد أمام إعادة التشغيل)"""
     try:
         now_saudi = saudi_now()
         day_start_saudi = now_saudi.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -95,9 +114,21 @@ def get_today_trade_count():
             print(f"[TradeCount] Unexpected response: {orders}")
             return 999  # أمان: لو فشلت القراءة لا يدخل صفقات جديدة
 
+        w_start = W1_START if window == 1 else W2_START
+        w_end   = W1_END   if window == 1 else W2_END
         count = 0
         for o in orders:
-            if o.get('side') == 'buy' and o.get('status') in ['filled', 'partially_filled', 'new', 'accepted', 'pending_new']:
+            if o.get('side') != 'buy':
+                continue
+            if o.get('status') not in ['filled', 'partially_filled', 'new', 'accepted', 'pending_new']:
+                continue
+            sub = o.get('submitted_at') or ''
+            try:
+                sub_dt = datetime.datetime.fromisoformat(sub.replace('Z', '+00:00'))
+                sub_saudi = (sub_dt.replace(tzinfo=None) + timedelta(hours=3)).time()
+            except Exception:
+                continue
+            if w_start <= sub_saudi < w_end:
                 count += 1
         return count
     except Exception as e:
@@ -171,7 +202,7 @@ def get_option_price(symbol_occ):
     return None
 
 def calculate_qty(symbol_occ):
-    """يحسب عدد العقود = 65% من المحفظة ÷ سعر العقد"""
+    """يحسب عدد العقود = 60% من المحفظة ÷ سعر العقد"""
     funds = get_available_funds()
     if funds is None:
         print("[Qty] Failed to get account funds — aborting")
@@ -185,7 +216,7 @@ def calculate_qty(symbol_occ):
     budget = funds * PORTFOLIO_PCT
     qty = int(budget // (option_price * 100))
 
-    print(f"[Qty] Funds={funds:.2f} | Budget(65%)={budget:.2f} | OptionPrice={option_price} | Qty={qty}")
+    print(f"[Qty] Funds={funds:.2f} | Budget(60%)={budget:.2f} | OptionPrice={option_price} | Qty={qty}")
 
     if qty < 1:
         print("[Qty] Budget too small for even 1 contract — aborting")
@@ -283,10 +314,11 @@ def monitor_position(symbol_occ, entry_price, qty, tp_pct):
             if current_price <= 0:
                 continue
 
-            # --- وقف الخسارة ---
+            # --- وقف الخسارة → إغلاق + إيقاف بقية اليوم ---
             if current_price <= sl_price:
                 print(f"[SL Hit] {symbol_occ} @ {current_price} (SL={sl_price:.2f})")
                 close_position_full(symbol_occ)
+                set_day_stopped(f"SL hit on {symbol_occ}")
                 return
 
         except Exception as e:
@@ -296,34 +328,40 @@ def monitor_position(symbol_occ, entry_price, qty, tp_pct):
 # Order placement
 # ==============================
 def place_option_order(symbol, action):
-    # 1) وقت التداول + نسبة الربح
-    tp_pct = get_tp_for_entry()
-    if tp_pct is None:
-        return {'status': 'ignored', 'message': 'Outside trading hours (4:45 PM - 9:20 PM Saudi)'}
+    # 0) هل اليوم موقوف؟ (بعد وقف خسارة أو إشارة عكسية)
+    if is_day_stopped():
+        print("[DayStop] Signal ignored — trading stopped for today")
+        return {'status': 'ignored', 'message': 'Trading stopped for today (SL hit or reverse signal)'}
 
-    # 2) حد الصفقتين اليومي
-    trade_count = get_today_trade_count()
-    if trade_count >= MAX_TRADES_PER_DAY:
-        print(f"[Limit] Daily trade limit reached ({trade_count}/{MAX_TRADES_PER_DAY})")
-        return {'status': 'ignored', 'message': f'Daily limit reached: {trade_count}/{MAX_TRADES_PER_DAY}'}
+    # 1) النافذة الحالية + نسبة الربح
+    window, tp_pct = get_current_window()
+    if window is None:
+        return {'status': 'ignored', 'message': 'Outside trading windows (4:40-6:15 PM / 8:00-9:00 PM Saudi)'}
 
-    # 3) سعر السهم
+    # 2) قاعدة الإشارة العكسية: صفقة مفتوحة بالاتجاه المعاكس → إغلاق + إيقاف بقية اليوم (بدون شراء)
+    opposite_type = 'P' if action == 'CALL' else 'C'
+    for pos in get_open_positions():
+        pos_symbol = pos.get('symbol', '')
+        if pos_symbol.startswith(symbol) and len(pos_symbol) > 12 and pos_symbol[12] == opposite_type:
+            print(f"[Reverse] Opposite signal received — closing {pos_symbol} and stopping for today")
+            close_position_full(pos_symbol)
+            set_day_stopped(f"Reverse signal ({action}) closed {pos_symbol}")
+            return {'status': 'closed_reverse', 'message': f'Closed {pos_symbol} on reverse signal — trading stopped for today'}
+
+    # 3) حد صفقة واحدة لكل نافذة
+    trade_count = get_window_trade_count(window)
+    if trade_count >= MAX_TRADES_PER_WIN:
+        print(f"[Limit] Window {window} trade limit reached ({trade_count}/{MAX_TRADES_PER_WIN})")
+        return {'status': 'ignored', 'message': f'Window {window} limit reached: {trade_count}/{MAX_TRADES_PER_WIN}'}
+
+    # 4) سعر السهم
     price = get_stock_price(symbol)
     if price is None:
         return {'status': 'error', 'message': 'Failed to get stock price — aborting'}
 
     symbol_occ, strike, expiry = build_occ_symbol(symbol, action, price)
 
-    # 4) إغلاق مركز عكسي إن وجد (الإشارة العكسية تسكر المركز السابق)
-    opposite_type = 'P' if action == 'CALL' else 'C'
-    for pos in get_open_positions():
-        pos_symbol = pos.get('symbol', '')
-        if pos_symbol.startswith(symbol) and len(pos_symbol) > 12 and pos_symbol[12] == opposite_type:
-            print(f"[Reverse] Closing opposite position {pos_symbol}")
-            close_position_full(pos_symbol)
-            time_module.sleep(3)  # ننتظر تحرير الرصيد قبل حساب الكمية
-
-    # 5) حساب الكمية: 65% من المحفظة
+    # 5) حساب الكمية: 60% من المحفظة
     qty, option_price = calculate_qty(symbol_occ)
     if qty is None:
         return {'status': 'error', 'message': 'Failed to calculate quantity (funds or option price unavailable)'}
@@ -394,7 +432,8 @@ def place_option_order(symbol, action):
         'tp_price': tp_price,
         'sl_pct': f"{SL_PCT*100:.0f}%",
         'portfolio_pct': f"{PORTFOLIO_PCT*100:.0f}%",
-        'trade_number_today': trade_count + 1,
+        'window': window,
+        'trade_number_in_window': trade_count + 1,
         'status': 'success'
     }
 
@@ -411,16 +450,17 @@ def process_signal_async(symbol, action):
 # ==============================
 @app.route('/')
 def home():
-    return 'Trading Bot v6.2 — TP 15%/5% by time | SL 30% | 65% portfolio sizing | 2 trades/day | instant webhook ACK ✅'
+    return 'Trading Bot v7.0 — Month Test | W1 4:40-6:15 TP15% | W2 8:00-9:00 TP5% | 1 trade/window | 60% sizing | SL 60% | day-stop on SL or reverse ✅'
 
 @app.route('/status')
 def status():
     positions = get_open_positions()
     return jsonify({
         'saudi_time': saudi_now().strftime('%Y-%m-%d %H:%M:%S'),
-        'current_tp': get_tp_for_entry(),
-        'trades_today': get_today_trade_count(),
-        'max_trades': MAX_TRADES_PER_DAY,
+        'current_window': get_current_window()[0],
+        'day_stopped': is_day_stopped(),
+        'w1_trades': get_window_trade_count(1),
+        'w2_trades': get_window_trade_count(2),
         'available_funds': get_available_funds(),
         'active_positions': positions,
         'count': len(positions)
