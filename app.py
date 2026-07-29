@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 import requests, os, datetime, threading, time
 
-app = Flask(_name_)
+app = Flask(__name__)
 
 ALPACA_KEY    = os.environ.get('ALPACA_KEY')
 ALPACA_SECRET = os.environ.get('ALPACA_SECRET')
