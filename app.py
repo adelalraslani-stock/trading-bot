@@ -12,7 +12,7 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 TIMEFRAME       = "3m"
 TAKE_PROFIT_PCT = 0.10   # الهدف النهائي — بيع كامل فوري عند الوصول له
-STOP_LOSS_PCT   = 0.50   # وقف الخسارة الاحتياطي — يشتغل فقط قبل ما تتفعّل أول درجة حماية
+STOP_LOSS_PCT   = 0.30   # وقف الخسارة الاحتياطي — يشتغل فقط قبل ما تتفعّل أول درجة حماية
 # ==============================
 # التعديل: قفل الربح المتدرج (Staircase Trailing) — درجات كل 5%
 # كل عنصر (نسبة الوصول, نسبة القفل المحمية بعدها)
@@ -22,7 +22,8 @@ STOP_LOSS_PCT   = 0.50   # وقف الخسارة الاحتياطي — يشتغ
 # ليتوقف قبل نسبة الهدف النهائي (10%) مباشرة.
 # ==============================
 STAIRCASE_STEPS = [
-    (0.05, 0.00),   # وصل 5%  -> يُحمى عند 0%  (تعادل تقريبًا)
+    (0.06, 0.03),   # وصل 6%  -> يُقفل ربح محمي عند 3%
+    (0.08, 0.05),   # وصل 8%  -> يُقفل ربح محمي عند 5%
 ]
 ORDER_QTY       = "10"
 ALLOWED_SYMBOLS = ["SPY", "QQQ", "META", "AVGO", "MSTR"]
@@ -38,6 +39,24 @@ KSA_TZ = datetime.timezone(datetime.timedelta(hours=3))
 # ==============================
 bot_paused      = False
 bot_paused_lock = threading.Lock()
+
+# ==============================
+# حماية من الإشارات المكررة (إعادة إرسال TradingView عند التايم آوت)
+# أي إشارة مطابقة (رمز+اتجاه) خلال 90 ثانية تُتجاهل فورًا
+# ==============================
+DEDUP_WINDOW_SEC = 90
+_last_signals = {}
+_dedup_lock = threading.Lock()
+
+def is_duplicate_signal(symbol, action):
+    key = f"{symbol}:{action}"
+    now = time.time()
+    with _dedup_lock:
+        last = _last_signals.get(key)
+        if last is not None and (now - last) < DEDUP_WINDOW_SEC:
+            return True
+        _last_signals[key] = now
+        return False
 
 # ==============================
 # التعديل: تتبع ربح/خسارة اليوم (يُصفَّر تلقائيًا عند تغيّر التاريخ بتوقيت السعودية)
@@ -651,7 +670,7 @@ def place_option_order(symbol, action, timeframe, signal_time=None):
             f"سعر العقد: {filled_price if filled_price else 'لم يتوفر بعد'}\n"
             f"الهدف النهائي: {TAKE_PROFIT_PCT:.0%}\n"
             f"وقف الخسارة الابتدائي: {STOP_LOSS_PCT:.0%}\n"
-            f"قفل ربح متدرج: 5%→0%\n\n"
+            f"قفل ربح متدرج: 6%→3%، 8%→5%\n\n"
             f"التاريخ: {date_txt}\n"
             f"الساعة: {time_txt}"
         )
@@ -685,7 +704,7 @@ def home():
         f'Options Bot ✅ | '
         f'Target={TAKE_PROFIT_PCT*100:.0f}% | '
         f'InitialSL={STOP_LOSS_PCT*100:.0f}% | '
-        f'Staircase=5%→0% | '
+        f'Staircase=6%→3%,8%→5% | '
         f'PositionSize={POSITION_SIZE_PCT:.0%} of cash | '
         f'DailyGoal(SPY/QQQ)={DAILY_WIN_TARGET} wins or {DAILY_LOSS_LIMIT} losses | '
         f'KSA: 16:45-22:15 | '
@@ -960,8 +979,19 @@ def setup_telegram_webhook():
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
+def _process_signal_async(symbol, action, timeframe, signal_time):
+    """تنفيذ الصفقة في الخلفية بعد الرد الفوري على TradingView"""
+    try:
+        result = place_option_order(symbol, action, timeframe, signal_time)
+        print(f"[Async Result] {symbol} {action} -> {result.get('status')}")
+    except Exception as e:
+        print(f"[Async Error] {symbol} {action}: {e}")
+
+
 @app.route('/webhook', methods=['POST'])
 def webhook():
+    """يرد على TradingView فورًا (أقل من ثانية) وينفّذ الصفقة في الخلفية.
+    يمنع رسائل 'timed out' وإعادة الإرسال المكرر."""
     try:
         data        = request.get_json(force=True, silent=True) or {}
         print(f"[Webhook] Received: {data}")
@@ -969,9 +999,20 @@ def webhook():
         symbol      = data.get('symbol', 'SPY').upper()
         timeframe   = data.get('timeframe', TIMEFRAME)
         signal_time = data.get('time', None)
-        result      = place_option_order(symbol, action, timeframe, signal_time)
-        http_code   = 400 if result.get('status') in ['error', 'rejected'] else 200
-        return jsonify({'status': result.get('status'), 'data': result}), http_code
+
+        if action not in ['CALL', 'PUT']:
+            return jsonify({'status': 'error', 'reason': 'الإشارة غير صحيحة'}), 400
+
+        # حماية من التكرار: إعادة إرسال TradingView لنفس الإشارة تُتجاهل فورًا
+        if is_duplicate_signal(symbol, action):
+            print(f"[Dedup] Duplicate {action} {symbol} ignored")
+            return jsonify({'status': 'ignored', 'reason': 'إشارة مكررة (إعادة إرسال)'}), 200
+
+        # رد فوري + معالجة بالخلفية
+        t = threading.Thread(target=_process_signal_async, args=(symbol, action, timeframe, signal_time))
+        t.daemon = True
+        t.start()
+        return jsonify({'status': 'accepted', 'message': f'{action} {symbol} received — processing'}), 200
     except Exception as e:
         print(f"[Webhook Error] {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
