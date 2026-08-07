@@ -73,8 +73,8 @@ POSITION_SIZE_PCT = 0.50   # نسبة الكاش المستخدمة لكل صف�
 # التعديل: هدف يومي (صفقتين ناجحتين) + سقف فشل (3 صفقات) — على SPY و QQQ فقط
 # ==============================
 DAILY_LIMIT_SYMBOLS = ["SPY", "QQQ"]
-DAILY_WIN_TARGET    = 2
-DAILY_LOSS_LIMIT    = 3
+DAILY_WIN_TARGET    = 1
+DAILY_LOSS_LIMIT    = 2
 
 daily_trade_state = {'date': None, 'wins': 0, 'losses': 0, 'stopped': False, 'stop_reason': None}
 daily_trade_lock  = threading.Lock()
@@ -186,11 +186,15 @@ def get_ksa_time(signal_time=None):
 
 
 def should_accept_signal(signal_time=None):
+    # فترتان فقط بتوقيت السعودية:
+    #   الأولى: 4:45 - 6:00 مساءً | الثانية: 8:10 - 9:15 مساءً
     ksa_time     = get_ksa_time(signal_time)
     current_time = ksa_time.time()
-    market_start = datetime.time(16, 45)
-    market_end   = datetime.time(22, 15)
-    if market_start <= current_time <= market_end:
+    w1_start = datetime.time(16, 45)
+    w1_end   = datetime.time(18, 0)
+    w2_start = datetime.time(20, 10)
+    w2_end   = datetime.time(21, 15)
+    if (w1_start <= current_time <= w1_end) or (w2_start <= current_time <= w2_end):
         return True
     print(f"[Time Filter] Ignored | KSA={ksa_time.strftime('%H:%M:%S')}")
     return False
@@ -600,7 +604,7 @@ def place_option_order(symbol, action, timeframe, signal_time=None):
         }
 
     if not should_accept_signal(signal_time):
-        return {'status': 'ignored', 'reason': 'خارج وقت التداول 4:45 PM - 10:15 PM KSA'}
+        return {'status': 'ignored', 'reason': 'خارج فترات التداول (4:45-6:00 م / 8:10-9:15 م)'}
 
     # ملاحظة: تأكيد إغلاق الشمعة (فوق/تحت شمعة الإشارة) يتم الآن داخل
     # مؤشر Pine Script نفسه قبل إرسال التنبيه، لذلك ينفذ البايثون فورًا
@@ -719,7 +723,7 @@ def home():
         f'TrailStop=+15%→lock+15% | MaxTarget=50% | '
         f'PositionSize={POSITION_SIZE_PCT:.0%} of cash | '
         f'DailyGoal(SPY/QQQ)={DAILY_WIN_TARGET} wins or {DAILY_LOSS_LIMIT} losses | '
-        f'KSA: 16:45-22:15 | '
+        f'Windows: 16:45-18:00 & 20:10-21:15 | '
         f'SPY/QQQ→ثاني يوم | META/AVGO/MSTR→الجمعة | '
         f'Confirm=Candle-Close | '
         f'TelegramCmds=/status /balance /pnl /close /breakeven /pause /resume /ping | '
@@ -748,7 +752,7 @@ def status():
             'initial_stop_loss' : f"{STOP_LOSS_PCT*100:.0f}%  (يشتغل قبل تحقيق +15%؛ بعدها الوقف يُرفع لـ +15%)",
             'trailing_stop'     : f"عند تحقيق +{int(TRAIL_TRIGGER_PCT*100)}% يُرفع الوقف ويثبت عند +{int(TRAIL_LOCK_PCT*100)}%",
             'max_target'        : f"{int(TAKE_PROFIT_PCT*100)}%",
-            'allowed_window_ksa': '16:45 - 22:15',
+            'allowed_windows_ksa': 'الأولى 16:45-18:00 | الثانية 20:10-21:15',
             'expiry_spy_qqq'    : 'ثاني يوم عمل',
             'expiry_meta_avgo_mstr': 'الجمعة القادمة',
             'confirmation_mode' : 'التأكيد يتم داخل مؤشر TradingView (إغلاق فوق/تحت شمعة الإشارة) قبل إرسال التنبيه'
