@@ -11,20 +11,20 @@ TELEGRAM_TOKEN   = os.environ.get('TELEGRAM_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 TIMEFRAME       = "3m"
-TAKE_PROFIT_PCT = 0.10   # الهدف النهائي — بيع كامل فوري عند الوصول له
-STOP_LOSS_PCT   = 0.30   # وقف الخسارة الاحتياطي — يشتغل فقط قبل ما تتفعّل أول درجة حماية
+TAKE_PROFIT_PCT = 0.50   # الهدف الأقصى — بيع كامل فوري عند الوصول له (+50%)
+STOP_LOSS_PCT   = 0.30   # وقف الخسارة الابتدائي (-30%) — قبل ما يتفعّل رفع الوقف
 # ==============================
-# التعديل: قفل الربح المتدرج (Staircase Trailing) — درجات كل 5%
-# كل عنصر (نسبة الوصول, نسبة القفل المحمية بعدها)
-# مثال: وصل الربح 5% -> يُقفل حد أدنى محمي عند 0%
-# ملاحظة: أي درجة تصل لـ TAKE_PROFIT_PCT أو أعلى منه بلا فايدة أصلاً
-# لأن الصفقة تُباع كهدف نهائي قبل ما توصلها — لذلك الجدول هنا مبني
-# ليتوقف قبل نسبة الهدف النهائي (10%) مباشرة.
+# منطق وقف الخسارة المتحرك (مثال 1 — وقف يقفز ويثبت):
+#   - يشتري العقد ووقف الخسارة الابتدائي -30%
+#   - أول ما يحقق ربح +15% -> يُرفع الوقف ليصير عند +15% ويثبت هناك
+#   - يستمر مع الصفقة صعودًا حتى:
+#       * إما يوصل الهدف الأقصى +50% -> يبيع (ربح كامل)
+#       * أو يرجع وينزل للوقف المثبّت +15% -> يبيع (ربح مؤمّن +15%)
+#       * أو (قبل تحقيق 15%) ينزل للوقف الابتدائي -30% -> يبيع
+# TRAIL_TRIGGER_PCT: عتبة تفعيل رفع الوقف | TRAIL_LOCK_PCT: مستوى الوقف بعد التفعيل
 # ==============================
-STAIRCASE_STEPS = [
-    (0.06, 0.03),   # وصل 6%  -> يُقفل ربح محمي عند 3%
-    (0.08, 0.05),   # وصل 8%  -> يُقفل ربح محمي عند 5%
-]
+TRAIL_TRIGGER_PCT = 0.15   # عند تحقيق +15% يُرفع الوقف
+TRAIL_LOCK_PCT    = 0.15   # الوقف يثبت عند +15%
 ORDER_QTY       = "10"
 ALLOWED_SYMBOLS = ["SPY", "QQQ", "META", "AVGO", "MSTR"]
 HEADERS = {
@@ -440,8 +440,9 @@ def monitor_tp_sl(symbol, occ_symbol, entry_price, qty_ordered, timeframe):
     max_checks = 480
     checks     = 0
 
-    # أعلى درجة قفل ربح تحققت حتى الآن لهذه الصفقة (None = لم تُفعّل أي درجة بعد)
-    current_lock = None
+    # منطق الوقف المتحرك (مثال 1): trail_active=False يعني الوقف لسه ابتدائي -30%
+    # أول ما يحقق +15% -> trail_active=True والوقف يقفز ويثبت عند +15%
+    trail_active = False
 
     while checks < max_checks:
         time.sleep(30)
@@ -466,22 +467,33 @@ def monitor_tp_sl(symbol, occ_symbol, entry_price, qty_ordered, timeframe):
             except:
                 total_pnl = 0
 
-            # تحديث أعلى درجة قفل ربح تم الوصول إليها (لا تنزل، فقط ترتفع)
-            for trigger_pct, lock_pct in STAIRCASE_STEPS:
-                if unrealized_pl_pct >= trigger_pct and (current_lock is None or lock_pct > current_lock):
-                    current_lock = lock_pct
-                    print(f"[Monitor] {occ_symbol} | 🔒 Staircase lock raised to {lock_pct:.0%} (profit hit {unrealized_pl_pct:.2%})")
+            # تفعيل الوقف المتحرك: أول ما يلمس +15% يُرفع الوقف ويثبت عند +15%
+            if not trail_active and unrealized_pl_pct >= TRAIL_TRIGGER_PCT:
+                trail_active = True
+                print(f"[Monitor] {occ_symbol} | 🔒 تم رفع الوقف إلى +{TRAIL_LOCK_PCT:.0%} (تحقق +{unrealized_pl_pct:.2%})")
+                date_txt, time_txt = now_ksa_text()
+                send_telegram_message(
+                    f"🔒 تم رفع وقف الخسارة\n\n"
+                    f"الرمز: {symbol}\n"
+                    f"العقد: {contract_label}\n"
+                    f"الصفقة حققت +{unrealized_pl_pct:.2%}\n"
+                    f"الوقف الآن مثبّت عند: +{TRAIL_LOCK_PCT:.0%}\n"
+                    f"الهدف الأقصى: +{TAKE_PROFIT_PCT:.0%}\n\n"
+                    f"التاريخ: {date_txt}\n"
+                    f"الساعة: {time_txt}"
+                )
 
-            print(f"[Monitor] {occ_symbol} | P/L={unrealized_pl_pct:.2%} | Lock={('—' if current_lock is None else f'{current_lock:.0%}')} | Price={current_price} | Check={checks}")
+            stop_label = f"+{TRAIL_LOCK_PCT:.0%} (مرفوع)" if trail_active else f"-{STOP_LOSS_PCT:.0%} (ابتدائي)"
+            print(f"[Monitor] {occ_symbol} | P/L={unrealized_pl_pct:.2%} | Stop={stop_label} | Price={current_price} | Check={checks}")
 
-            # 1) وصول الهدف النهائي -> بيع كامل فوري (يُحتسب "صفقة ناجحة")
+            # 1) وصول الهدف الأقصى +50% -> بيع كامل فوري (صفقة ناجحة)
             if unrealized_pl_pct >= TAKE_PROFIT_PCT:
                 close_position_market(occ_symbol, qty, "ربح")
                 record_trade_pnl(total_pnl)
                 record_daily_trade_result(symbol, True)
                 date_txt, time_txt = now_ksa_text()
                 send_telegram_message(
-                    f"🎯 تم البيع على الهدف النهائي\n\n"
+                    f"🎯 تم البيع على الهدف الأقصى\n\n"
                     f"الرمز: {symbol}\n"
                     f"الفريم: {timeframe}\n"
                     f"العقد: {contract_label}\n"
@@ -495,21 +507,21 @@ def monitor_tp_sl(symbol, occ_symbol, entry_price, qty_ordered, timeframe):
                 )
                 break
 
-            # 2) ارتداد للأسفل ولمس درجة القفل المحمية -> بيع وقفل الربح المتحقق (تعادل تقريبًا = ليست "ناجحة")
-            if current_lock is not None and unrealized_pl_pct <= current_lock:
-                close_position_market(occ_symbol, qty, "قفل ربح متدرج")
+            # 2) الوقف مرفوع وارتد لـ +15% -> بيع بربح مؤمّن (صفقة ناجحة)
+            if trail_active and unrealized_pl_pct <= TRAIL_LOCK_PCT:
+                close_position_market(occ_symbol, qty, "وقف مرفوع +15%")
                 record_trade_pnl(total_pnl)
-                record_daily_trade_result(symbol, total_pnl > 0)
+                record_daily_trade_result(symbol, True)
                 date_txt, time_txt = now_ksa_text()
                 send_telegram_message(
-                    f"🔒 تم البيع عند قفل الربح المتدرج\n\n"
+                    f"🔒 تم البيع عند الوقف المرفوع\n\n"
                     f"الرمز: {symbol}\n"
                     f"الفريم: {timeframe}\n"
                     f"العقد: {contract_label}\n"
                     f"الكمية: {qty}\n"
                     f"سعر الدخول: {avg_entry_price}\n"
                     f"سعر البيع: {current_price}\n"
-                    f"مستوى القفل المحمي: {current_lock:.0%}\n"
+                    f"الوقف المرفوع: +{TRAIL_LOCK_PCT:.0%}\n"
                     f"نسبة الربح عند البيع: {unrealized_pl_pct:.2%}\n"
                     f"💰 إجمالي الربح: ${total_pnl:+.2f}\n\n"
                     f"التاريخ: {date_txt}\n"
@@ -517,8 +529,8 @@ def monitor_tp_sl(symbol, occ_symbol, entry_price, qty_ordered, timeframe):
                 )
                 break
 
-            # 3) لم تتفعّل أي درجة حماية بعد -> وقف الخسارة الاحتياطي الأصلي (فاشلة)
-            if current_lock is None and unrealized_pl_pct <= -STOP_LOSS_PCT:
+            # 3) الوقف لسه ابتدائي (ما تحقق 15%) وينزل لـ -30% -> بيع وقف خسارة (فاشلة)
+            if not trail_active and unrealized_pl_pct <= -STOP_LOSS_PCT:
                 close_position_market(occ_symbol, qty, "وقف خسارة")
                 record_trade_pnl(total_pnl)
                 record_daily_trade_result(symbol, False)
@@ -670,7 +682,7 @@ def place_option_order(symbol, action, timeframe, signal_time=None):
             f"سعر العقد: {filled_price if filled_price else 'لم يتوفر بعد'}\n"
             f"الهدف النهائي: {TAKE_PROFIT_PCT:.0%}\n"
             f"وقف الخسارة الابتدائي: {STOP_LOSS_PCT:.0%}\n"
-            f"قفل ربح متدرج: 6%→3%، 8%→5%\n\n"
+            f"وقف متحرك: عند +15% يُرفع الوقف لـ +15% | الهدف الأقصى +50%\n\n"
             f"التاريخ: {date_txt}\n"
             f"الساعة: {time_txt}"
         )
@@ -704,7 +716,7 @@ def home():
         f'Options Bot ✅ | '
         f'Target={TAKE_PROFIT_PCT*100:.0f}% | '
         f'InitialSL={STOP_LOSS_PCT*100:.0f}% | '
-        f'Staircase=6%→3%,8%→5% | '
+        f'TrailStop=+15%→lock+15% | MaxTarget=50% | '
         f'PositionSize={POSITION_SIZE_PCT:.0%} of cash | '
         f'DailyGoal(SPY/QQQ)={DAILY_WIN_TARGET} wins or {DAILY_LOSS_LIMIT} losses | '
         f'KSA: 16:45-22:15 | '
@@ -733,8 +745,9 @@ def status():
             'position_size_pct' : f"{POSITION_SIZE_PCT:.0%} من الكاش المتاح لكل صفقة",
             'daily_goal'        : f"{DAILY_WIN_TARGET} صفقة ناجحة أو {DAILY_LOSS_LIMIT} صفقات فاشلة على SPY/QQQ فقط",
             'final_target'      : f"{TAKE_PROFIT_PCT*100:.0f}%",
-            'initial_stop_loss' : f"{STOP_LOSS_PCT*100:.0f}%  (يشتغل فقط قبل تفعيل أول درجة حماية)",
-            'staircase_steps'   : [f"وصول {int(t*100)}% → قفل عند {int(l*100)}%" for t, l in STAIRCASE_STEPS],
+            'initial_stop_loss' : f"{STOP_LOSS_PCT*100:.0f}%  (يشتغل قبل تحقيق +15%؛ بعدها الوقف يُرفع لـ +15%)",
+            'trailing_stop'     : f"عند تحقيق +{int(TRAIL_TRIGGER_PCT*100)}% يُرفع الوقف ويثبت عند +{int(TRAIL_LOCK_PCT*100)}%",
+            'max_target'        : f"{int(TAKE_PROFIT_PCT*100)}%",
             'allowed_window_ksa': '16:45 - 22:15',
             'expiry_spy_qqq'    : 'ثاني يوم عمل',
             'expiry_meta_avgo_mstr': 'الجمعة القادمة',
