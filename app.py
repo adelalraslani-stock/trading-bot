@@ -26,7 +26,7 @@ STOP_LOSS_PCT   = 0.30   # وقف الخسارة الابتدائي (-30%) — �
 TRAIL_TRIGGER_PCT = 0.15   # عند تحقيق +15% يُرفع الوقف
 TRAIL_LOCK_PCT    = 0.15   # الوقف يثبت عند +15%
 ORDER_QTY       = "10"
-ALLOWED_SYMBOLS = ["SPY", "QQQ", "META", "AVGO", "MSTR"]
+ALLOWED_SYMBOLS = ["SPY"]
 HEADERS = {
     'APCA-API-KEY-ID'    : ALPACA_KEY,
     'APCA-API-SECRET-KEY': ALPACA_SECRET
@@ -67,12 +67,12 @@ daily_pnl_lock = threading.Lock()
 # ==============================
 # التعديل: حجم الصفقة الديناميكي بناءً على نسبة من رصيد المحفظة
 # ==============================
-POSITION_SIZE_PCT = 0.50   # نسبة الكاش المستخدمة لكل صفقة (البقية احتياطي)
+POSITION_SIZE_PCT = 0.60   # نسبة الكاش المستخدمة لكل صفقة (البقية احتياطي)
 
 # ==============================
-# التعديل: هدف يومي (صفقتين ناجحتين) + سقف فشل (3 صفقات) — على SPY و QQQ فقط
+# التعديل: هدف يومي (صفقتين ناجحتين) + سقف فشل (3 صفقات) — على SPY فقط
 # ==============================
-DAILY_LIMIT_SYMBOLS = ["SPY", "QQQ"]
+DAILY_LIMIT_SYMBOLS = ["SPY"]
 DAILY_WIN_TARGET    = 1
 DAILY_LOSS_LIMIT    = 2
 
@@ -101,8 +101,8 @@ def record_trade_pnl(pnl_amount):
 
 
 def record_daily_trade_result(symbol, is_win):
-    """يسجّل نتيجة صفقة SPY/QQQ ضمن هدف اليوم (صفقتان ناجحتان) وسقف الفشل (3 صفقات).
-    يوقف استقبال إشارات جديدة على SPY/QQQ تلقائيًا عند تحقق أي من الشرطين، حتى يبدأ يوم تداول جديد."""
+    """يسجّل نتيجة صفقة SPY ضمن هدف اليوم (صفقتان ناجحتان) وسقف الفشل (3 صفقات).
+    يوقف استقبال إشارات جديدة على SPY تلقائيًا عند تحقق أي من الشرطين، حتى يبدأ يوم تداول جديد."""
     if symbol not in DAILY_LIMIT_SYMBOLS:
         return
     with daily_trade_lock:
@@ -126,8 +126,8 @@ def record_daily_trade_result(symbol, is_win):
             daily_trade_state['stopped']     = True
             daily_trade_state['stop_reason'] = 'هدف'
             send_telegram_message(
-                f"🏁 تم تحقيق الهدف اليومي (SPY/QQQ)\n\n"
-                f"تحققت {DAILY_WIN_TARGET} صفقة ناجحة اليوم — تم إيقاف استقبال إشارات جديدة على SPY/QQQ حتى يوم تداول جديد.\n\n"
+                f"🏁 تم تحقيق الهدف اليومي (SPY)\n\n"
+                f"تحققت {DAILY_WIN_TARGET} صفقة ناجحة اليوم — تم إيقاف استقبال إشارات جديدة على SPY حتى يوم تداول جديد.\n\n"
                 f"الصفقات الرابحة: {daily_trade_state['wins']}\n"
                 f"الصفقات غير الرابحة: {daily_trade_state['losses']}"
             )
@@ -135,15 +135,15 @@ def record_daily_trade_result(symbol, is_win):
             daily_trade_state['stopped']     = True
             daily_trade_state['stop_reason'] = 'خسائر'
             send_telegram_message(
-                f"🛑 تم بلوغ الحد الأقصى للمحاولات الفاشلة (SPY/QQQ)\n\n"
-                f"{DAILY_LOSS_LIMIT} صفقات بدون ربح حقيقي اليوم — تم إيقاف استقبال إشارات جديدة على SPY/QQQ حتى يوم تداول جديد.\n\n"
+                f"🛑 تم بلوغ الحد الأقصى للمحاولات الفاشلة (SPY)\n\n"
+                f"{DAILY_LOSS_LIMIT} صفقات بدون ربح حقيقي اليوم — تم إيقاف استقبال إشارات جديدة على SPY حتى يوم تداول جديد.\n\n"
                 f"الصفقات الرابحة: {daily_trade_state['wins']}\n"
                 f"الصفقات غير الرابحة: {daily_trade_state['losses']}"
             )
 
 
 def is_daily_limit_reached(symbol):
-    """يتحقق هل SPY/QQQ متوقفة اليوم بسبب تحقيق الهدف أو بلوغ سقف الفشل."""
+    """يتحقق هل SPY متوقفة اليوم بسبب تحقيق الهدف أو بلوغ سقف الفشل."""
     if symbol not in DAILY_LIMIT_SYMBOLS:
         return False
     with daily_trade_lock:
@@ -255,25 +255,56 @@ def calculate_order_qty(occ_symbol):
         return ORDER_QTY
 
 
+def choose_strike_and_qty(symbol, action, price, expiry):
+    """يختار السترايك والكمية معًا:
+    - يبدأ من ATM (أقرب سترايك للسعر)
+    - يشتري بـ POSITION_SIZE_PCT من الكاش
+    - لو ما يكفي لعقد واحد عند ATM -> يبتعد سترايك للأرخص (OTM):
+        CALL لأعلى | PUT لأسفل، بحد أقصى نقطتين
+    - لو حتى بعد نقطتين ما يكفي -> يرجع (None, None)
+    يرجع (occ_symbol, qty_str) أو (None, None)
+    """
+    try:
+        account = get_account_info()
+        if not account:
+            print("[StrikeSelect] فشل جلب بيانات الحساب")
+            return None, None
+        available_cash = float(account.get('cash', 0))
+        budget = available_cash * POSITION_SIZE_PCT
+
+        atm = round(price)
+        step = 1 if action == 'CALL' else -1   # اتجاه الأرخص (OTM)
+
+        for offset in range(0, 3):             # 0 = ATM، ثم نقطة، ثم نقطتين
+            strike = atm + (step * offset)
+            occ = build_occ_symbol(symbol, expiry, action, strike)
+            opt_price = get_option_latest_price(occ)
+            if not opt_price or opt_price <= 0:
+                print(f"[StrikeSelect] {occ} | لا يوجد سعر — تجربة السترايك التالي")
+                continue
+            qty = int(budget // (opt_price * 100))
+            if qty >= 1:
+                print(f"[StrikeSelect] ✅ Strike={strike} (ابتعاد {offset}) | Ask=${opt_price} | Budget(60%)=${budget:.2f} | Qty={qty}")
+                return occ, str(qty)
+            else:
+                print(f"[StrikeSelect] Strike={strike} غالي (${opt_price*100:.0f}/عقد) على ميزانية ${budget:.2f} — ابتعاد أكثر")
+
+        print(f"[StrikeSelect] ❌ الكاش لا يكفي لعقد واحد حتى بعد نقطتين ابتعاد (ميزانية ${budget:.2f})")
+        return None, None
+    except Exception as e:
+        print(f"[StrikeSelect Error] {e}")
+        return None, None
+
+
 def get_expiry(symbol, signal_time=None):
+    """SPY فقط — انتهاء نفس اليوم (0DTE). يرجع تاريخ اليوم بتوقيت نيويورك."""
     try:
         if signal_time:
             signal_dt = datetime.datetime.fromisoformat(signal_time.replace('Z', '+00:00'))
         else:
             signal_dt = datetime.datetime.now(datetime.timezone.utc)
         ny_time  = signal_dt - datetime.timedelta(hours=4)
-        today_ny = ny_time.date()
-        if symbol in ["META", "AVGO", "MSTR"]:
-            days_ahead = (4 - today_ny.weekday()) % 7
-            if days_ahead == 0:
-                days_ahead = 7
-            expiry = today_ny + datetime.timedelta(days=days_ahead)
-        else:
-            next_day = today_ny + datetime.timedelta(days=1)
-            while next_day.weekday() >= 5:
-                next_day += datetime.timedelta(days=1)
-            expiry = next_day
-        return expiry
+        return ny_time.date()   # نفس اليوم (0DTE)
     except Exception as e:
         print(f"[Expiry Error] {e}")
         return datetime.date.today()
@@ -592,7 +623,7 @@ def place_option_order(symbol, action, timeframe, signal_time=None):
             return {'status': 'paused', 'reason': 'البوت متوقف مؤقتًا (/resume للاستئناف)'}
 
     # ==============================
-    # التعديل: هدف يومي (SPY/QQQ) — تجاهل أي إشارة جديدة لو تحقق الهدف أو سقف الفشل اليوم
+    # التعديل: هدف يومي (SPY) — تجاهل أي إشارة جديدة لو تحقق الهدف أو سقف الفشل اليوم
     # ==============================
     if is_daily_limit_reached(symbol):
         with daily_trade_lock:
@@ -638,15 +669,25 @@ def place_option_order(symbol, action, timeframe, signal_time=None):
     if price is None:
         return {'status': 'error', 'reason': f'Could not fetch price for {symbol}'}
 
-    expiry         = get_expiry(symbol, signal_time)
-    strike         = round(price)
-    occ_symbol     = build_occ_symbol(symbol, expiry, action, strike)
-    contract_label = format_contract_label(occ_symbol)
+    expiry = get_expiry(symbol, signal_time)   # نفس اليوم (0DTE) لـ SPY
 
-    # ==============================
-    # التعديل: حجم الصفقة الديناميكي بناءً على 50% من رصيد الكاش المتاح
-    # ==============================
-    order_qty = calculate_order_qty(occ_symbol)
+    # اختيار السترايك والكمية معًا:
+    # يبدأ ATM، ويبتعد للأرخص (نقطة/نقطتين) لو الكاش ما يكفي عند ATM
+    occ_symbol, order_qty = choose_strike_and_qty(symbol, action, price, expiry)
+    if occ_symbol is None:
+        date_txt, time_txt = now_ksa_text()
+        send_telegram_message(
+            f"⚠️ تم تجاهل الإشارة — الكاش لا يكفي\n\n"
+            f"الرمز: {symbol} {action}\n"
+            f"سعر السهم: {price}\n"
+            f"حتى بعد الابتعاد نقطتين، ميزانية الـ60% لا تغطي عقدًا واحدًا.\n\n"
+            f"التاريخ: {date_txt}\n"
+            f"الساعة: {time_txt}"
+        )
+        return {'status': 'ignored', 'reason': 'الكاش لا يكفي لعقد واحد حتى بعد نقطتين'}
+
+    strike         = int(occ_symbol[-8:]) / 1000   # للسجل/الرسائل
+    contract_label = format_contract_label(occ_symbol)
 
     print(f"[OCC] {occ_symbol} | Price={price} | Strike={strike} | Expiry={expiry} | Qty={order_qty}")
 
@@ -672,7 +713,7 @@ def place_option_order(symbol, action, timeframe, signal_time=None):
     if r.status_code in [200, 201] and order_id:
         filled_price, order_status = wait_for_filled_price(order_id)
         date_txt, time_txt = now_ksa_text()
-        expiry_type = "الجمعة" if symbol in ["META", "AVGO", "MSTR"] else "ثاني يوم"
+        expiry_type = "نفس اليوم (0DTE)"
 
         send_telegram_message(
             f"✅ تم شراء عقد\n\n"
@@ -722,9 +763,9 @@ def home():
         f'InitialSL={STOP_LOSS_PCT*100:.0f}% | '
         f'TrailStop=+15%→lock+15% | MaxTarget=50% | '
         f'PositionSize={POSITION_SIZE_PCT:.0%} of cash | '
-        f'DailyGoal(SPY/QQQ)={DAILY_WIN_TARGET} wins or {DAILY_LOSS_LIMIT} losses | '
+        f'DailyGoal(SPY)={DAILY_WIN_TARGET} wins or {DAILY_LOSS_LIMIT} losses | '
         f'Windows: 16:45-18:00 & 20:10-21:15 | '
-        f'SPY/QQQ→ثاني يوم | META/AVGO/MSTR→الجمعة | '
+        f'SPY→0DTE (نفس اليوم) | '
         f'Confirm=Candle-Close | '
         f'TelegramCmds=/status /balance /pnl /close /breakeven /pause /resume /ping | '
         f'Telegram={"ON" if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID else "OFF"}'
@@ -747,14 +788,13 @@ def status():
             'symbols'           : ALLOWED_SYMBOLS,
             'timeframe'         : TIMEFRAME,
             'position_size_pct' : f"{POSITION_SIZE_PCT:.0%} من الكاش المتاح لكل صفقة",
-            'daily_goal'        : f"{DAILY_WIN_TARGET} صفقة ناجحة أو {DAILY_LOSS_LIMIT} صفقات فاشلة على SPY/QQQ فقط",
+            'daily_goal'        : f"{DAILY_WIN_TARGET} صفقة ناجحة أو {DAILY_LOSS_LIMIT} صفقات فاشلة على SPY فقط",
             'final_target'      : f"{TAKE_PROFIT_PCT*100:.0f}%",
             'initial_stop_loss' : f"{STOP_LOSS_PCT*100:.0f}%  (يشتغل قبل تحقيق +15%؛ بعدها الوقف يُرفع لـ +15%)",
             'trailing_stop'     : f"عند تحقيق +{int(TRAIL_TRIGGER_PCT*100)}% يُرفع الوقف ويثبت عند +{int(TRAIL_LOCK_PCT*100)}%",
             'max_target'        : f"{int(TAKE_PROFIT_PCT*100)}%",
             'allowed_windows_ksa': 'الأولى 16:45-18:00 | الثانية 20:10-21:15',
-            'expiry_spy_qqq'    : 'ثاني يوم عمل',
-            'expiry_meta_avgo_mstr': 'الجمعة القادمة',
+            'expiry_spy'        : 'نفس اليوم (0DTE)',
             'confirmation_mode' : 'التأكيد يتم داخل مؤشر TradingView (إغلاق فوق/تحت شمعة الإشارة) قبل إرسال التنبيه'
         }
     })
@@ -778,40 +818,10 @@ def test_spy_put():
     return jsonify(place_option_order('SPY', 'PUT', TIMEFRAME, now))
 
 
-@app.route('/test_qqq_call')
-def test_qqq_call():
-    now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    return jsonify(place_option_order('QQQ', 'CALL', TIMEFRAME, now))
 
 
-@app.route('/test_qqq_put')
-def test_qqq_put():
-    now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    return jsonify(place_option_order('QQQ', 'PUT', TIMEFRAME, now))
 
 
-@app.route('/test_meta_call')
-def test_meta_call():
-    now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    return jsonify(place_option_order('META', 'CALL', TIMEFRAME, now))
-
-
-@app.route('/test_avgo_call')
-def test_avgo_call():
-    now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    return jsonify(place_option_order('AVGO', 'CALL', TIMEFRAME, now))
-
-
-@app.route('/test_mstr_call')
-def test_mstr_call():
-    now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    return jsonify(place_option_order('MSTR', 'CALL', TIMEFRAME, now))
-
-
-@app.route('/test_mstr_put')
-def test_mstr_put():
-    now = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    return jsonify(place_option_order('MSTR', 'PUT', TIMEFRAME, now))
 
 
 # ══════════════════════════════════════════════════════════
@@ -877,7 +887,7 @@ def handle_telegram_command(command_text):
             else:
                 goal_wins, goal_losses, goal_stopped = daily_trade_state['wins'], daily_trade_state['losses'], daily_trade_state['stopped']
         emoji = "💰" if total >= 0 else "💸"
-        goal_line = f"\n\n🎯 هدف SPY/QQQ: {goal_wins}/{DAILY_WIN_TARGET} ناجحة، {goal_losses}/{DAILY_LOSS_LIMIT} فاشلة" + (" (متوقف)" if goal_stopped else "")
+        goal_line = f"\n\n🎯 هدف SPY: {goal_wins}/{DAILY_WIN_TARGET} ناجحة، {goal_losses}/{DAILY_LOSS_LIMIT} فاشلة" + (" (متوقف)" if goal_stopped else "")
         return (
             f"{emoji} ربح/خسارة اليوم\n\n"
             f"الصافي: ${total:+.2f}\n"
